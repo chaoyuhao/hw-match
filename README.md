@@ -1,6 +1,8 @@
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
-本地环境与测试仅用于开发调试；正确性、性能和最终得分以统一线上平台评测为准。当前 `kernel.asc` 仍为待实现模板，环境小算子通过不代表赛题通过。
+本地 baseline：运行 `bash scripts/run_local.sh`，详见 [本地 baseline 说明](docs/LOCAL_BASELINE.md)。`kernel.asc` 已实现两阶段候选版本，实际 NPU 编译与精度待验证。
+
+本地环境与测试仅用于开发调试；正确性、性能和最终得分以统一线上平台评测为准，环境小算子通过不代表赛题通过。
 
 以下为原题说明。
 

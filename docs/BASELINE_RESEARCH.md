@@ -2,7 +2,7 @@
 
 调研日期：2026-09-29。依据：本仓库 README、全部模板源码、官方 CANN 文档，以及用户提供的远端机器信息。
 
-当前阶段是方案研究，`kernel.asc` 仍为空实现；本文不代表已经编译、运行或通过比赛评测。
+进度更新：`kernel.asc` 已实现两阶段本地候选版本，见[运行说明](LOCAL_BASELINE.md)。以下方案调研保留用于说明设计依据；baseline 的真实 NPU 编译、精度和比赛评测尚未验证。
 
 本地环境检查入口为 `bash scripts/check_env.sh`，详见[环境检查说明](ENVIRONMENT_CHECK.md)。自有昇腾卡用于开发调试，比赛正确性、性能和最终得分以统一线上平台评测为准。
 
@@ -21,8 +21,8 @@ Y[b]     = sum_m R[b,m]
 - 全负行的最大值也必须为负，初值不能是 0。
 - 矩阵乘累加和后续归约均保留 FP32；golden 用输入量化后的实际存储值做 FP64 计算，再转 FP32。
 - README 要求 15 个测试点全部正确才计分。最大 M/N/K 在描述中提到 8192，但详细的维度范围和总规模限制丢失，不应自行补造。
-- 用户远端机器：910B2C，`npu-smi` 显示驱动版本 `25.0.rc1.1`。这不能证明安装的 CANN 是比赛要求的 9.0.0。后续诊断确认 `bisheng` 在 `/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/bisheng`，CMake 在 `/usr/local/python3.10.17/bin/cmake`；没有在所查目录中找到环境脚本。`bisheng --version` 返回构建日期 `2025-04-14`、Clang `15.0.5` 和目标 `x86_64-unknown-linux-gnu`，Python/Python3/Python3.10 命令也已找到。返回信息未列出 `ASCConfig.cmake` 或 CANN 版本文件；尚不能确定 toolkit 版本、CMake 是否可运行、是否支持此模板的 `.asc` 构建。
-- 本工作区没有发现 NPU 设备、常见路径下的 CANN、`bisheng` 或 `ccec`；Python 有 NumPy，缺 `ml_dtypes`。远端环境尚需单独检查。
+- 用户最初的 openEuler / 910B2C 镜像已确认为 CANN 8.1.RC1，无法配置 ASC 工程。随后切换 Ubuntu 24.04 / CANN 9.1.0 镜像，独立 `.asc` 向量加法已经完成配置、编译、链接与 NPU 运行，64 个输出全部匹配；ACL 可见逻辑设备 0，报告 24 个 Cube 核。新镜像的 NumPy 与 `ml_dtypes` 均可用。9.1.0 与比赛要求的 9.0.0 仍有版本差异。
+- 本开发工作区没有 NPU、CANN、`bisheng` 或 `ccec`，只有 NumPy，缺 `ml_dtypes`。本地 baseline 使用 NumPy 自行编码有限 BF16 数据；此处的单元测试不代表远端 Matmul 已通过。
 
 输入物理布局：
 
@@ -39,7 +39,7 @@ Y[b]     = sum_m R[b,m]
 
 | 文件 | 当前内容与影响 |
 | --- | --- |
-| `kernel.asc` | 被 `main.asc` include；唯一待实现入口为 `run_kernel`。不能加入另一个 `main`。 |
+| `kernel.asc` | 被 `main.asc` include；入口为 `run_kernel`，现已填入本地 baseline。不能加入另一个 `main`。 |
 | `main.asc` | 固定跑 FP16、`B=1,M=1,N=1,K=32`、两个属性 false；输入字节数和 shape 都写死。 |
 | `CMakeLists.txt` | `.asc` 直调工程，`find_package(ASC REQUIRED)`；默认架构 `dav-2201`，已链接 `tiling_api`、`platform` 等库。 |
 | `scripts/gen_data.py` | 只生成上面一个 case。 |
@@ -183,8 +183,8 @@ command -v bisheng ccec cmake python3
 
 ## 下一步顺序
 
-1. 确认远端 CANN 版本、`set_env.sh`、`bisheng` 和 `ASCConfig.cmake`；修正启动路径。
+1. 已通过 CANN 9.1.0 环境检查；在该镜像运行 `bash scripts/run_local.sh` 验证新 baseline。
 2. 获取平台提交规则与 README 缺失的规模限制，确认多 kernel、workspace 和计时范围。
-3. 实现两阶段 Matmul + MaxSum；先核对 FP32 中间矩阵，再核对最终 y。
-4. 扩展测试 runner，覆盖 dtype、布局、负值、尾块、大 K 和重复执行。
+3. 根据本地两阶段实现的报告核对 FP32 中间矩阵和最终 y，修正编译或精度问题。
+4. 运行 `--suite full`，覆盖 dtype、布局、负值、尾块、大 K、大 batch 和重复执行。
 5. 用平台验证全 case 后保存首个通过版本，再研究 tile 融合与性能。
