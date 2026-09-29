@@ -141,16 +141,29 @@ main() {
     fi
     if [ -n "$ENV_SCRIPT" ]; then
         printf 'Loading environment script: %s\n' "$ENV_SCRIPT"
-        local source_rc=0
-        set +u
-        # Keep a vendor script's `set -e` from suppressing the diagnostic report.
-        if source "$ENV_SCRIPT"; then
-            source_rc=0
-        else
+        local source_rc=1 env_snapshot=""
+        # A separate Bash preserves the vendor script's errexit/exit semantics.
+        # Never put the exported environment (which may contain secrets) in logs.
+        env_snapshot="$(mktemp "${TMPDIR:-/tmp}/cann-envcheck-XXXXXX")"
+        if [ -n "$env_snapshot" ]; then
+            timeout --kill-after=5s 20s bash -c '
+                readonly CANN_ENV_SNAPSHOT_DEST="$2"
+                source "$1"
+                source_rc=$?
+                [ "$source_rc" -eq 0 ] || exit "$source_rc"
+                export -p > "$CANN_ENV_SNAPSHOT_DEST"
+            ' bash "$ENV_SCRIPT" "$env_snapshot"
             source_rc=$?
+            if [ "$source_rc" -eq 0 ]; then
+                if [ -s "$env_snapshot" ]; then
+                    source "$env_snapshot"
+                    source_rc=$?
+                else
+                    source_rc=1
+                fi
+            fi
+            rm -f "$env_snapshot"
         fi
-        set +e
-        set -uo pipefail
         if [ "$source_rc" -eq 0 ]; then
             record PASS env_script "loaded"
         else

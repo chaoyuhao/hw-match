@@ -129,17 +129,27 @@ fi
 
     def test_environment_script_failure_preserves_remaining_diagnostics(self):
         env_script = self.root / "broken_env.sh"
-        env_script.write_text("set -e\nfalse\n")
+        env_script.write_text("set -e\nfalse\necho unreachable_environment_command\n")
         result = self.run_check("--inspect-only", "--env-script", str(env_script))
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("[FAIL] env_script", result.stdout)
         self.assertIn("[PASS] compiler", result.stdout)
         self.assertIn("Local diagnostic summary:", result.stdout)
+        self.assertNotIn("unreachable_environment_command", result.stdout)
 
     def test_invalid_device_argument_is_rejected(self):
         result = self.run_check("--device", "7;echo injected")
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertFalse((self.root / "calls").exists())
+
+    def test_environment_script_exit_preserves_remaining_diagnostics(self):
+        env_script = self.root / "exiting_env.sh"
+        env_script.write_text("exit 3\n")
+        result = self.run_check("--inspect-only", "--env-script", str(env_script))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("[FAIL] env_script: source exited 3", result.stdout)
+        self.assertIn("[PASS] compiler", result.stdout)
+        self.assertIn("Local diagnostic summary:", result.stdout)
 
 
 if __name__ == "__main__":

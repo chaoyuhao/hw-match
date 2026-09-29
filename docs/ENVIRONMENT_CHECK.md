@@ -46,6 +46,8 @@ bash scripts/check_env.sh --arch dav-2201 --output-dir /tmp/cann-envcheck
 
 环境脚本自动查找优先使用 `ASCEND_HOME_PATH` / `ASCEND_TOOLKIT_HOME` 下以及上一级的 `set_env.sh`。变量未设置时，尝试从 `bisheng` 路径推断安装目录，再考虑常见安装路径。可以先手动 source 正确脚本或使用 `--env-script` 指定。
 
+环境脚本在独立 Bash 中执行，成功后导入其导出的环境变量；加载失败或超时仍会继续收集诊断。环境变量快照使用权限受限的临时文件，导入后删除，不写入报告。
+
 ## 如何读结果
 
 | 状态 | 意义 |
