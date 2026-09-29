@@ -1,6 +1,8 @@
 # 第一轮优化：并行行最大值
 
-参照版本是 `d01d01b`：此前线上 15/15 通过；本地 `B=1,M=8192,N=65,K=32,FP16,transpose=00` 的 host median 为 **3448.2545 μs**，独立 profiler 的 Task Duration median 为 **3412.408 μs**。当前版本是新候选，尚无真实 CANN 编译、NPU 回归或提速结果。
+参照版本是 `d01d01b`：本地 `B=1,M=8192,N=65,K=32,FP16,transpose=00` 的 host median 为 **3448.2545 μs**，独立 profiler 的 Task Duration median 为 **3412.408 μs**。并行归约版本 `72abad1` 在相同 CANN 9.1.0 / 910B2C 环境下，该例 PASS，host median 为 **358.3775 μs**，Task Duration median 为 **324.048 μs**，分别快 **9.62× / 10.53×**；源码哈希和采样配置已核对，普通重复及 profiling 输出误差均为 0。报告位于 `build-perf/run-20260929T2225/`。
+
+用户随后反馈线上再次 **15/15 通过**，13 个点变快，详见 [线上对比](ONLINE_BASELINE.md)。尚未收到本轮本地 full 55 项、reduction 62 项和完整 stress 48 项报告，不能沿用旧版记录充当这些回归的通过证据。
 
 ## 改动
 

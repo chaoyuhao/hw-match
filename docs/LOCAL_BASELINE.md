@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前 kernel 是在 `d01d01b` 基础上的并行行最大值候选，尚待真实 CANN/NPU 验证。新增 `bash scripts/run_local.sh --suite reduction` 的 62 项专项回归，详见 [第一轮归约优化](PARALLEL_REDUCTION.md)。下文的历史通过记录不代表当前候选已经通过。
+当前 kernel 是 `72abad1` 的并行行最大值实现：本地 CANN 9.1.0 / 910B2C 大 M 性能用例已通过，用户反馈线上再次 15/15 通过，详见 [第一轮归约优化](PARALLEL_REDUCTION.md) 和 [线上对比](ONLINE_BASELINE.md)。新增 `bash scripts/run_local.sh --suite reduction` 的 62 项专项回归；本轮 full/reduction 的完整本地报告尚未回传，下文旧版本通过记录不能替代这些回归。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 

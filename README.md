@@ -1,6 +1,6 @@
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
-本地 baseline：运行 `bash scripts/run_local.sh --suite full`，详见 [本地 baseline 说明](docs/LOCAL_BASELINE.md)。参照版本 `d01d01b` 已通过线上 15/15，见 [线上记录](docs/ONLINE_BASELINE.md)。当前 kernel 是第一轮并行归约候选，需重新进行 NPU 和线上验证；实现及运行命令见 [并行归约优化](docs/PARALLEL_REDUCTION.md)。
+本地 baseline：运行 `bash scripts/run_local.sh --suite full`，详见 [本地 baseline 说明](docs/LOCAL_BASELINE.md)。用户反馈第一轮并行归约版本 `72abad1` 线上 15/15 通过，其中 13 个点较首轮变快；完整对比见 [线上记录](docs/ONLINE_BASELINE.md)。实现及本地回归命令见 [并行归约优化](docs/PARALLEL_REDUCTION.md)。
 
 本地性能分析：先运行 `bash scripts/run_perf.sh --inspect-tools`，再运行 `bash scripts/run_perf.sh --suite quick`；压力测试、msprof 采集与报告说明见 [性能基础设施](docs/LOCAL_PERFORMANCE.md)。
 
