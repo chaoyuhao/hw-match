@@ -6,7 +6,7 @@ for argument in "$@"; do
     case "$argument" in
         --generate-only) GENERATE_ONLY=1 ;;
         -h|--help)
-            echo 'Usage: bash scripts/run_local.sh [--suite smoke|full] [--case NAME] [--device 0] [--repeat 2] [--timeout 120] [--generate-only] [--no-dump-similarity]'
+            echo 'Usage: bash scripts/run_local.sh [--suite smoke|full|reduction] [--case NAME] [--device 0] [--repeat 2] [--timeout 120] [--generate-only] [--no-dump-similarity]'
             exit 0 ;;
         --output-dir|--binary|--output-dir=*|--binary=*)
             echo 'run_local.sh manages unique output/build paths; use local_baseline.py directly for custom paths.' >&2

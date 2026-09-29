@@ -71,6 +71,19 @@ def cases_for_suite(suite):
         cases.append(dict(name=f"{name}_{dtype}_{int(ta)}{int(tb)}", b=b, m=m, n=n, k=k,
                           dtype=dtype, ta=ta, tb=tb, pattern=pattern, seed=20260929))
 
+    if suite == "reduction":
+        for dtype in ("fp16", "bf16"):
+            for ta in (False, True):
+                for tb in (False, True):
+                    for m, n in ((31, 63), (32, 64), (33, 65), (65, 255), (65, 256), (65, 257)):
+                        add(f"reduce_m{m}_n{n}", (2, m, n, 24), dtype, ta, tb)
+            add("reduce_negative_large", (1, 8192, 65, 32), dtype, False, False, "negative")
+            for m in (1023, 1024, 1025, 8192):
+                add(f"reduce_cancel_m{m}", (2, m, 65, 8), dtype, True, True, "row_cancellation")
+            add("reduce_sum_carry", (2, 1026, 65, 8), dtype, True, True, "sum_carry")
+            add("reduce_batch_groups", (257, 33, 257, 8), dtype, True, False, "negative")
+        return cases
+
     add("template", (1, 1, 1, 32), "fp16")
     for dtype in ("fp16", "bf16"):
         for ta in (False, True):
@@ -111,6 +124,23 @@ def make_case(case, directory):
     elif case["pattern"] == "cancellation":
         a[:, :, 1::2] = a[:, :, ::2]
         x[:, 1::2, :] = -x[:, ::2, :]
+    elif case["pattern"] == "row_cancellation":
+        # Exactly representable in both input formats. Each row's entire dot
+        # product is one value, so this isolates cancellation in the M sum.
+        a.fill(0)
+        x.fill(0)
+        cycle = np.array([4096, 0.03125, -4096, -0.015625], dtype=np.float32)
+        a[:, :, 0] = cycle[np.arange(m) % 4]
+        a[1::2, :, 0] *= -1
+        x[:, 0, :] = 1
+    elif case["pattern"] == "sum_carry":
+        # A half-ulp after 4096 must be carried from rows 0..1023 into the
+        # next chunk. Resetting compensation at row 1024 changes y to zero.
+        a.fill(0)
+        x.fill(0)
+        a[:, 1022:1026, 0] = [4096, 2**-12, 2**-12, -4096]
+        a[1::2, :, 0] *= -1
+        x[:, 0, :] = 1
     pa, pb, similarity, golden = prepare_inputs(a, x, case["dtype"], case["ta"], case["tb"])
     pa.tofile(directory / "x1.bin")
     pb.tofile(directory / "x2.bin")
@@ -171,7 +201,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--suite", choices=("smoke", "full"), default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "full", "reduction"), default="smoke")
     parser.add_argument("--case", help="run exactly one named case from the selected suite")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--repeat", type=int, default=2)

@@ -1,5 +1,7 @@
 # 本地 BatchMatmulMaxSum baseline
 
+当前 kernel 是在 `d01d01b` 基础上的并行行最大值候选，尚待真实 CANN/NPU 验证。新增 `bash scripts/run_local.sh --suite reduction` 的 62 项专项回归，详见 [第一轮归约优化](PARALLEL_REDUCTION.md)。下文的历史通过记录不代表当前候选已经通过。
+
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
 线上空白模板返回 `Profiling rule violated: each iteration must launch exactly 1 kernel. Expected 75 launches, got 0.`，说明每次迭代必须恰好启动一次；75 是平台累计预期次数，不是在一次调用中启动 75 次。旧版有两次启动，不能满足这项限制。当前版本合为一个 MIX kernel，并在 `2e079f8` 清理调试代码。用户反馈清理后通过线上全部 15 项，见 [线上耗时记录](ONLINE_BASELINE.md)。55 项本地记录仍属于旧版本，不能沿用为新版回归结果。
@@ -14,7 +16,7 @@
 
 用户只替换 `0624c72` 的 `kernel.asc` 后，收到“提交代码中存在不合规内容，请检查并删除后提交。如需Debug请在本地进行。”，没有具体函数或行号。因此只能提出待验证的假设：原提交文件中的显式打印、退出或诊断数据回读被检查到。尚无证据确认具体命中项。
 
-当前清理删除 `kernel.asc` 中的 `fprintf`、`abort`、诊断 `aclrtMemcpy` / `aclrtMemset` 及相关头文件。所有打印、诊断回读和文件输出均在 `local/runner.asc` 中。内部执行函数返回已完成计算的设备 scratch 所有权：正式入口直接释放；本地 runner 可在释放前回读。提交文件不包含宏隐藏的调试分支，也不依赖本地 runner。设备计算和同步代码与 `0624c72` 逐字节一致；清理后用户反馈提交成功，具体触发拒绝的内容仍未确认。
+`2e079f8` 清理时删除了 `kernel.asc` 中的 `fprintf`、`abort`、诊断 `aclrtMemcpy` / `aclrtMemset` 及相关头文件。所有打印、诊断回读和文件输出均在 `local/runner.asc` 中。内部执行函数返回已完成计算的设备 scratch 所有权：正式入口直接释放；本地 runner 可在释放前回读。提交文件不包含宏隐藏的调试分支，也不依赖本地 runner。当时的设备计算和同步代码与 `0624c72` 逐字节一致；清理后用户反馈提交成功，具体触发拒绝的内容仍未确认。本轮候选已修改归约和跨核同步，需要重新回归。
 
 ACL、参数或 tiling 错误仍会抛出异常，不被吞掉。若 stream 持续同步失败，scratch 不提前释放，由设备 context 清理；本地 runner 在输入/输出缓冲析构前检查 stream，必要时终止测试进程。已用 mock ACL 的 C++14 检查验证返回值移动、正常释放、异常恢复及同步持续失败四种所有权路径；这不验证 NPU 或平台规则。
 
@@ -68,13 +70,14 @@ python3 scripts/local_baseline.py \
 
 1. 一个 `__mix__(1,1)` kernel 内，由 AIV 调用 Matmul 高阶 API，通过通信框架在 AIC 执行矩阵乘。FP16/BF16 输入、FP32 输出；每个任务负责一个 batch 内最多 `32×64` 的输出块，沿完整 K 计算。四种转置存储布局直接通过地址偏移和 API 的 transpose 参数解释。
 2. 每个 AIV 等待自己负责的 Matmul 完成后，全体 AIV 执行 `SyncAll<true>()`，使归约能够读取其他核产生的中间结果。启动块数不超过入口传入的可用 Cube 核数，且设置 `__schedmode__(1)`，满足同步的调度要求。所有 AIV 都参加同步，包括不负责最终输出的核。
-3. 同一次启动内执行 Vector 归约：每次读取一行最多 1024 列，仅包含实际有效的 N 个元素；按固定行顺序，用补偿求和累加 FP32 行最大值。没有浮点原子加，也没有第二次 kernel 启动。
+3. 同一次启动内执行 Vector 归约：每个任务处理 32 行、每次读最多 256 列；WholeReduceMax 的 repeat 同时处理多行，再用向量 Max 合并列段。所有行最大值写入独占且对齐的 GM 区域后，再次进行 AIV 核间同步。
+4. 最终输出 owner 每次读取最多 1024 个行最大值，按原固定行顺序进行 FP32 补偿求和。没有浮点原子加，也没有第二次 kernel 启动。
 
 系统 workspace 用 `__kfc_workspace__` 参数传递；移除旧版的纯 Cube 编译宏和 `SetSysWorkspace`。Matmul 的 UB 预算设为 128 KiB，为归约缓冲和通信留出空间。Matmul 与归约共用 TPipe，局部同步事件通过 `FetchEventID` 获取。
 
-中间矩阵行跨度为 `round_up(N,16)`，空间约为 `4*B*M*round_up(N,16)` 字节，另有 Matmul 系统 workspace。本地诊断默认还会在 host 保留中间矩阵和 FP64 golden。M/N/K 支持范围为 `[1,8192]`；实际可运行规模还受内存限制。README 示例中的 K=2 也可作为诊断输入，生成的常规用例遵守 K 为 8 的倍数。
+中间矩阵行跨度为 `round_up(N,16)`，空间为 `4*B*M*round_up(N,16)` 字节；同一 allocation 尾部增加 `4*B*round_up(M,32)` 字节行最大值，另有 Matmul 系统 workspace。本地诊断继续读取 allocation 开头的中间矩阵，并在 host 保留 FP64 golden。M/N/K 支持范围为 `[1,8192]`；实际可运行规模还受内存限制。README 示例中的 K=2 也可作为诊断输入，生成的常规用例遵守 K 为 8 的倍数。
 
-输出按每 8 个 batch 一组划分任务，避免不同核同时写入同一个 32 字节区域；最后不足 32 字节使用 `DataCopyPad` 精确写回。每次调用分配临时 GM，stream 同步后释放。中间矩阵不预填 NaN，所有有效元素由本次计算写入，padding 不参与归约；本地 runner 仍在每次执行前把最终输出填为 NaN。因此当前版本仍包含分配、同步及全量中间矩阵读写的开销，**不是性能优化版**。
+输出按每 8 个 batch 一组划分任务，避免不同核同时写入同一个 32 字节区域；最后不足 32 字节使用 `DataCopyPad` 精确写回。每次调用分配临时 GM，stream 同步后释放。中间矩阵不预填 NaN，所有有效元素由本次计算写入，padding 不参与归约；本地 runner 仍在每次执行前把最终输出填为 NaN。当前候选只优化归约，仍包含分配、同步及全量中间矩阵读写的开销。
 
 ## 验证范围
 

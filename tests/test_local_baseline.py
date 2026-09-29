@@ -73,6 +73,35 @@ class LocalBaselineTests(unittest.TestCase):
         self.assertTrue(any(c["n"] > 1024 for c in cases))
         self.assertTrue(any(c["b"] > 8 * 24 for c in cases), "exercise reduction group reuse on the 24-Cube-core host")
 
+    def test_reduction_suite_covers_new_tile_and_sum_boundaries(self):
+        cases = self.api.cases_for_suite("reduction")
+        for n in (63, 64, 65, 255, 256, 257):
+            layouts = {(c["dtype"], c["ta"], c["tb"]) for c in cases if c["n"] == n}
+            self.assertEqual(layouts, {(d, a, b) for d in ("fp16", "bf16")
+                                     for a in (False, True) for b in (False, True)})
+        self.assertTrue({31, 32, 33, 1023, 1024, 1025, 8192}.issubset({c["m"] for c in cases}))
+        self.assertTrue(any(c["b"] == 257 and c["m"] > 32 for c in cases))
+        self.assertTrue(any(c["pattern"] == "negative" and c["m"] == 8192 for c in cases))
+        self.assertEqual(len(self.api.cases_for_suite("full")), 55)
+
+    def test_row_cancellation_pattern_has_known_positive_and_negative_totals(self):
+        candidates = [c for c in self.api.cases_for_suite("reduction")
+                      if c["pattern"] == "row_cancellation" and c["m"] == 1024]
+        self.assertEqual(len(candidates), 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            for case in candidates:
+                similarity, y = self.api.make_case(case, Path(tmp) / case["name"])
+                np.testing.assert_array_equal(y, [4.0, -4.0])
+                np.testing.assert_array_equal(similarity[0, :4, 0], [4096, 0.03125, -4096, -0.015625])
+
+    def test_sum_carry_fixture_requires_compensation_across_chunk_boundary(self):
+        candidates = [c for c in self.api.cases_for_suite("reduction") if c["pattern"] == "sum_carry"]
+        self.assertEqual(len(candidates), 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            for case in candidates:
+                _, y = self.api.make_case(case, Path(tmp) / case["name"])
+                np.testing.assert_array_equal(y, [2**-11, -2**-11])
+
     def test_failed_runner_never_produces_a_success_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
