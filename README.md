@@ -1,6 +1,8 @@
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
-本地 baseline：运行 `bash scripts/run_local.sh`，详见 [本地 baseline 说明](docs/LOCAL_BASELINE.md)。`kernel.asc` 已实现两阶段候选版本，实际 NPU 编译与精度待验证。
+本地 baseline：运行 `bash scripts/run_local.sh --suite full`，详见 [本地 baseline 说明](docs/LOCAL_BASELINE.md)。两次启动的旧版本 `377f283` 已在用户的 910B2C / CANN 9.1.0 上通过 55/55 项测试；当前 `kernel.asc` 改为单次启动候选实现，需重新验证。
+
+已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h` 文件。当前实现只需复制 `kernel.asc`，无需新增文件。
 
 本地环境与测试仅用于开发调试；正确性、性能和最终得分以统一线上平台评测为准，环境小算子通过不代表赛题通过。
 

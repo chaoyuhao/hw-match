@@ -1,5 +1,7 @@
 # 本地 baseline 实现计划
 
+2026-09-29 更新：以下保留首版两次启动的设计记录。该版 `377f283` 已获用户 NPU 55/55 通过反馈。线上随后明确要求每次迭代恰好启动一个 kernel，并且仅可修改 `kernel.asc` 或新增 `.asc` / `.h`。当前修订将 Matmul 与归约置于同一个 MIX 1:1 kernel，中间通过 AIV `SyncAll` 同步；沿用完整用例和诊断接口，重新验证新版。实现自包含于 `kernel.asc`，用户手动复制，不生成提交包。最新用法与状态见 [LOCAL_BASELINE.md](LOCAL_BASELINE.md)。
+
 目标：在已通过环境小测试的 910B2C / CANN 9.1.0 镜像上，提供可编译、可运行、可逐项验证的 BatchMatmulMaxSum 候选实现。开发工作区没有 CANN/NPU，实际编译和设备精度状态必须单独报告。
 
 依据：[赛题 README](../README.md)、[已讨论的两阶段方案](BASELINE_RESEARCH.md)。比赛以 CANN 9.0.0 线上评测为准。

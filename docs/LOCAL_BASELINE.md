@@ -1,6 +1,12 @@
 # 本地 BatchMatmulMaxSum baseline
 
-这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。用户的 910B2C / CANN 9.1.0 镜像已经通过独立向量加法检查；本 baseline 的 Matmul 编译、运行和精度仍需在该镜像验证。
+这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
+
+线上空白模板返回 `Profiling rule violated: each iteration must launch exactly 1 kernel. Expected 75 launches, got 0.`，说明每次迭代必须恰好启动一次；75 是平台累计预期次数，不是在一次调用中启动 75 次。旧版有两次启动，不能满足这项限制。当前版本合为一个 MIX kernel，**新版尚未进行 CANN 编译、NPU 回归或线上评测**，旧版通过记录不能沿用为新版结果。
+
+## 线上修改范围
+
+用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选实现自包含于 `kernel.asc`，在本地重新验证后，将整个文件复制到线上对应文件即可，不需要提交包或新增文件。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
 
 ## 运行
 
@@ -50,12 +56,15 @@ python3 scripts/local_baseline.py \
 
 `kernel.asc` 保留原始 `run_kernel` 签名，由原 `main.asc` 和本地 runner 共用。实际计算都在 NPU 执行，host 只校验元数据、计算 tiling、分配空间和调度：
 
-1. Cube kernel：Matmul 高阶 API，FP16/BF16 输入，FP32 输出；每个任务负责一个 batch 内最多 `32×64` 的输出块，沿完整 K 计算。四种转置存储布局直接通过地址偏移和 API 的 transpose 参数解释。
-2. Vector kernel：每次读取一行最多 1024 列，归约时仅包含实际有效的 N 个元素；按固定行顺序，用补偿求和累加 FP32 行最大值。没有浮点原子加。
+1. 一个 `__mix__(1,1)` kernel 内，由 AIV 调用 Matmul 高阶 API，通过通信框架在 AIC 执行矩阵乘。FP16/BF16 输入、FP32 输出；每个任务负责一个 batch 内最多 `32×64` 的输出块，沿完整 K 计算。四种转置存储布局直接通过地址偏移和 API 的 transpose 参数解释。
+2. 每个 AIV 等待自己负责的 Matmul 完成后，全体 AIV 执行 `SyncAll<true>()`，使归约能够读取其他核产生的中间结果。启动块数不超过入口传入的可用 Cube 核数，且设置 `__schedmode__(1)`，满足同步的调度要求。所有 AIV 都参加同步，包括不负责最终输出的核。
+3. 同一次启动内执行 Vector 归约：每次读取一行最多 1024 列，仅包含实际有效的 N 个元素；按固定行顺序，用补偿求和累加 FP32 行最大值。没有浮点原子加，也没有第二次 kernel 启动。
+
+系统 workspace 用 `__kfc_workspace__` 参数传递；移除旧版的纯 Cube 编译宏和 `SetSysWorkspace`。Matmul 的 UB 预算设为 128 KiB，为归约缓冲和通信留出空间。Matmul 与归约共用 TPipe，局部同步事件通过 `FetchEventID` 获取。
 
 中间矩阵行跨度为 `round_up(N,16)`，空间约为 `4*B*M*round_up(N,16)` 字节，另有 Matmul 系统 workspace。本地诊断默认还会在 host 保留中间矩阵和 FP64 golden。M/N/K 支持范围为 `[1,8192]`；实际可运行规模还受内存限制。README 示例中的 K=2 也可作为诊断输入，生成的常规用例遵守 K 为 8 的倍数。
 
-输出按每 8 个 batch 一组划分任务，避免不同核同时写入同一个 32 字节区域；最后不足 32 字节使用 `DataCopyPad` 精确写回。每次调用分配临时 GM，stream 同步后释放。因此当前版本包含分配、初始化、同步及全量中间矩阵读写的开销，**不是性能优化版**。
+输出按每 8 个 batch 一组划分任务，避免不同核同时写入同一个 32 字节区域；最后不足 32 字节使用 `DataCopyPad` 精确写回。每次调用分配临时 GM，stream 同步后释放。只有本地导出中间矩阵的诊断路径会预填 NaN；正式入口不做该初始化。因此当前版本仍包含分配、同步及全量中间矩阵读写的开销，**不是性能优化版**。
 
 ## 验证范围
 
@@ -75,10 +84,13 @@ bash -n scripts/run_local.sh
 bash scripts/run_local.sh --generate-only --suite full
 ```
 
-这些检查验证数据工具和失败处理，不替代真实 CANN 编译、内存检查器或 NPU 测试。当前尚未确认平台允许多次 kernel launch、host 临时 GM 分配和内部同步，因此不能直接把本版本称为可提交版本。
+这些检查验证数据工具和失败处理，不替代真实 CANN 编译、内存检查器或 NPU 测试。单次启动候选版需要重新跑完整 55 项，重点检查 MIX 编译、通信 workspace、跨核同步及两次执行一致性。代码中只有一处 kernel launch，实际 profiler 的计数仍须线上确认；host 临时 GM 分配和内部同步的接受情况也以线上反馈为准。
 
 ## 使用的官方接口
 
+- [CANN 9.0 MIX Matmul 融合实现](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/programug/Ascendcopdevg/atlas_ascendc_10_0050.html)
+- [SyncAll：同步范围、核数与调度约束](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0204.html)
+- [FetchEventID](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0116.html)
 - [CANN 9.0 Matmul 实现流程](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/programug/Ascendcopdevg/atlas_ascendc_10_0038.html)
 - [GetTiling：标准 C++ TCubeTiling](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0692.html)
 - [SetOrgShape：输入跨度与输出跨度](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0651.html)
