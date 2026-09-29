@@ -129,12 +129,14 @@ def read_f32(path, count):
     return np.fromfile(path, dtype="<f4")
 
 
-def run_case(binary, case, directory, device, repeat, timeout, dump_similarity):
+def run_case(binary, case, directory, device, repeat, timeout, dump_similarity, benchmark=None):
     result = dict(case=case, status="FAIL", online_evaluation="NOT_RUN")
     start = time.monotonic()
     try:
         similarity, golden = make_case(case, directory)
         command = [str(binary), str(directory), str(device), str(repeat), str(int(dump_similarity))]
+        if benchmark is not None:
+            command.extend(str(value) for value in benchmark)
         result["command"] = command
         with (directory / "runtime.log").open("w") as log:
             process = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=timeout)

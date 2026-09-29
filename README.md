@@ -1,6 +1,8 @@
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
-本地 baseline：运行 `bash scripts/run_local.sh --suite full`，详见 [本地 baseline 说明](docs/LOCAL_BASELINE.md)。两次启动的旧版本 `377f283` 已在用户的 910B2C / CANN 9.1.0 上通过 55/55 项测试；当前 `kernel.asc` 改为单次启动候选实现，需重新验证。
+本地 baseline：运行 `bash scripts/run_local.sh --suite full`，详见 [本地 baseline 说明](docs/LOCAL_BASELINE.md)。用户反馈当前单次启动版本已通过线上 15/15，耗时仍有明显优化空间，见 [线上记录](docs/ONLINE_BASELINE.md)。
+
+本地性能分析：先运行 `bash scripts/run_perf.sh --inspect-tools`，再运行 `bash scripts/run_perf.sh --suite quick`；压力测试、msprof 采集与报告说明见 [性能基础设施](docs/LOCAL_PERFORMANCE.md)。
 
 已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h` 文件。当前实现只需复制 `kernel.asc`，无需新增文件。
 

@@ -2,7 +2,7 @@
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
-线上空白模板返回 `Profiling rule violated: each iteration must launch exactly 1 kernel. Expected 75 launches, got 0.`，说明每次迭代必须恰好启动一次；75 是平台累计预期次数，不是在一次调用中启动 75 次。旧版有两次启动，不能满足这项限制。当前版本合为一个 MIX kernel，**新版尚未进行 CANN 编译、NPU 回归或线上评测**，旧版通过记录不能沿用为新版结果。
+线上空白模板返回 `Profiling rule violated: each iteration must launch exactly 1 kernel. Expected 75 launches, got 0.`，说明每次迭代必须恰好启动一次；75 是平台累计预期次数，不是在一次调用中启动 75 次。旧版有两次启动，不能满足这项限制。当前版本合为一个 MIX kernel，并在 `2e079f8` 清理调试代码。用户反馈清理后通过线上全部 15 项，见 [线上耗时记录](ONLINE_BASELINE.md)。55 项本地记录仍属于旧版本，不能沿用为新版回归结果。
 
 ## 线上修改范围
 
@@ -14,7 +14,7 @@
 
 用户只替换 `0624c72` 的 `kernel.asc` 后，收到“提交代码中存在不合规内容，请检查并删除后提交。如需Debug请在本地进行。”，没有具体函数或行号。因此只能提出待验证的假设：原提交文件中的显式打印、退出或诊断数据回读被检查到。尚无证据确认具体命中项。
 
-当前清理删除 `kernel.asc` 中的 `fprintf`、`abort`、诊断 `aclrtMemcpy` / `aclrtMemset` 及相关头文件。所有打印、诊断回读和文件输出均在 `local/runner.asc` 中。内部执行函数返回已完成计算的设备 scratch 所有权：正式入口直接释放；本地 runner 可在释放前回读。提交文件不包含宏隐藏的调试分支，也不依赖本地 runner。设备计算和同步代码与 `0624c72` 逐字节一致，仍需确认真实编译和平台接受情况。
+当前清理删除 `kernel.asc` 中的 `fprintf`、`abort`、诊断 `aclrtMemcpy` / `aclrtMemset` 及相关头文件。所有打印、诊断回读和文件输出均在 `local/runner.asc` 中。内部执行函数返回已完成计算的设备 scratch 所有权：正式入口直接释放；本地 runner 可在释放前回读。提交文件不包含宏隐藏的调试分支，也不依赖本地 runner。设备计算和同步代码与 `0624c72` 逐字节一致；清理后用户反馈提交成功，具体触发拒绝的内容仍未确认。
 
 ACL、参数或 tiling 错误仍会抛出异常，不被吞掉。若 stream 持续同步失败，scratch 不提前释放，由设备 context 清理；本地 runner 在输入/输出缓冲析构前检查 stream，必要时终止测试进程。已用 mock ACL 的 C++14 检查验证返回值移动、正常释放、异常恢复及同步持续失败四种所有权路径；这不验证 NPU 或平台规则。
 
@@ -94,7 +94,7 @@ bash -n scripts/run_local.sh
 bash scripts/run_local.sh --generate-only --suite full
 ```
 
-这些检查验证数据工具和失败处理，不替代真实 CANN 编译、内存检查器或 NPU 测试。单次启动候选版需要重新跑完整 55 项，重点检查 MIX 编译、通信 workspace、跨核同步及两次执行一致性。代码中只有一处 kernel launch，实际 profiler 的计数仍须线上确认；host 临时 GM 分配和内部同步的接受情况也以线上反馈为准。
+这些检查验证数据工具和失败处理，不替代真实 CANN 编译、内存检查器或 NPU 测试。后续优化仍需要完整 55 项回归及线上确认，重点检查 MIX 通信 workspace、跨核同步及重复输出一致性。新增本地计时和压力测试入口见 [性能分析](LOCAL_PERFORMANCE.md)，计时不修改 kernel。
 
 ## 使用的官方接口
 
