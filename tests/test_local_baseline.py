@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import sys
@@ -16,6 +17,33 @@ class LocalBaselineTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("local_baseline", MODULE)
         self.api = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.api)
+
+    def test_tiling_suite_covers_large_tiles_layouts_tails_and_long_k(self):
+        cases = self.api.cases_for_suite("tiling")
+        self.assertEqual(len(cases), 34)
+        self.assertEqual(len({c["name"] for c in cases}), 34)
+        self.assertEqual({(c["dtype"], c["ta"], c["tb"]) for c in cases},
+                         {(d, a, b) for d in ("fp16", "bf16") for a in (False, True) for b in (False, True)})
+        self.assertTrue({(129, 257), (127, 129), (65, 129), (63, 127)} <= {(c["m"], c["n"]) for c in cases})
+        self.assertTrue(any(c["k"] == 2048 for c in cases))
+        self.assertTrue(any(c["pattern"] == "negative" for c in cases))
+        self.assertEqual(len(self.api.cases_for_suite("full")), 55)
+        self.assertEqual(len(self.api.cases_for_suite("reduction")), 62)
+
+    def test_matmul_plan_metadata_checks_real_grid_and_requested_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            case = dict(b=1, m=8192, n=65)
+            self.assertIsNone(self.api.read_matmul_plan(directory, case))
+            plan = dict(policy="auto", tile_m=128, tile_n=128, tasks=64, blocks=24, available_cores=24)
+            path = directory / "matmul_plan.json"
+            path.write_text(json.dumps(plan))
+            self.assertEqual(self.api.read_matmul_plan(directory, case), plan)
+            for fields in (dict(tasks=512), dict(blocks=25), dict(tile_m=0), dict(policy="32x64"),
+                           dict(tile_n=True), dict(available_cores=0)):
+                path.write_text(json.dumps(dict(plan, **fields)))
+                with self.assertRaises(ValueError):
+                    self.api.read_matmul_plan(directory, case)
 
     def test_known_values_and_all_storage_layouts(self):
         a = np.array([[[1, 0], [0, 1]]], dtype=np.float32)

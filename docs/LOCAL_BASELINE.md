@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前 kernel 是 `72abad1` 的并行行最大值实现：本地 CANN 9.1.0 / 910B2C 大 M 性能用例已通过，用户反馈线上再次 15/15 通过，详见 [第一轮归约优化](PARALLEL_REDUCTION.md) 和 [线上对比](ONLINE_BASELINE.md)。新增 `bash scripts/run_local.sh --suite reduction` 的 62 项专项回归；本轮 full/reduction 的完整本地报告尚未回传，下文旧版本通过记录不能替代这些回归。
+当前 kernel 是在 `72abad1` 基础上的 [Matmul 分块候选](MATMUL_TILING.md)，尚待真实 CANN/NPU 验证；新增 `--suite tiling` 的 34 项回归。参照 `72abad1` 的本地 CANN 9.1.0 / 910B2C 大 M 性能用例已通过，用户反馈线上 15/15 通过，详见 [第一轮归约优化](PARALLEL_REDUCTION.md) 和 [线上对比](ONLINE_BASELINE.md)。这些记录不能替代当前候选的回归。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -68,7 +68,7 @@ python3 scripts/local_baseline.py \
 
 `kernel.asc` 保留原始 `run_kernel` 签名，由原 `main.asc` 和本地 runner 共用。实际计算都在 NPU 执行，host 只校验元数据、计算 tiling、分配空间和调度：
 
-1. 一个 `__mix__(1,1)` kernel 内，由 AIV 调用 Matmul 高阶 API，通过通信框架在 AIC 执行矩阵乘。FP16/BF16 输入、FP32 输出；每个任务负责一个 batch 内最多 `32×64` 的输出块，沿完整 K 计算。四种转置存储布局直接通过地址偏移和 API 的 transpose 参数解释。
+1. 一个 `__mix__(1,1)` kernel 内，由 AIV 调用 Matmul 高阶 API，通过通信框架在 AIC 执行矩阵乘。FP16/BF16 输入、FP32 输出；每个任务负责一个 batch 内的输出块，外层分块由 `32×64` 到 `128×128` 按 shape 选择，沿完整 K 计算。四种转置存储布局直接通过地址偏移和 API 的 transpose 参数解释。
 2. 每个 AIV 等待自己负责的 Matmul 完成后，全体 AIV 执行 `SyncAll<true>()`，使归约能够读取其他核产生的中间结果。启动块数不超过入口传入的可用 Cube 核数，且设置 `__schedmode__(1)`，满足同步的调度要求。所有 AIV 都参加同步，包括不负责最终输出的核。
 3. 同一次启动内执行 Vector 归约：每个任务处理 32 行、每次读最多 256 列；WholeReduceMax 的 repeat 同时处理多行，再用向量 Max 合并列段。所有行最大值写入独占且对齐的 GM 区域后，再次进行 AIV 核间同步。
 4. 最终输出 owner 每次读取最多 1024 个行最大值，按原固定行顺序进行 FP32 补偿求和。没有浮点原子加，也没有第二次 kernel 启动。
@@ -77,7 +77,7 @@ python3 scripts/local_baseline.py \
 
 中间矩阵行跨度为 `round_up(N,16)`，空间为 `4*B*M*round_up(N,16)` 字节；同一 allocation 尾部增加 `4*B*round_up(M,32)` 字节行最大值，另有 Matmul 系统 workspace。本地诊断继续读取 allocation 开头的中间矩阵，并在 host 保留 FP64 golden。M/N/K 支持范围为 `[1,8192]`；实际可运行规模还受内存限制。README 示例中的 K=2 也可作为诊断输入，生成的常规用例遵守 K 为 8 的倍数。
 
-输出按每 8 个 batch 一组划分任务，避免不同核同时写入同一个 32 字节区域；最后不足 32 字节使用 `DataCopyPad` 精确写回。每次调用分配临时 GM，stream 同步后释放。中间矩阵不预填 NaN，所有有效元素由本次计算写入，padding 不参与归约；本地 runner 仍在每次执行前把最终输出填为 NaN。当前候选只优化归约，仍包含分配、同步及全量中间矩阵读写的开销。
+输出按每 8 个 batch 一组划分任务，避免不同核同时写入同一个 32 字节区域；最后不足 32 字节使用 `DataCopyPad` 精确写回。每次调用分配临时 GM，stream 同步后释放。中间矩阵不预填 NaN，所有有效元素由本次计算写入，padding 不参与归约；本地 runner 仍在每次执行前把最终输出填为 NaN。当前候选仍包含分配、同步及全量中间矩阵读写的开销。
 
 ## 验证范围
 

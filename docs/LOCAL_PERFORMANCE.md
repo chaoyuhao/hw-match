@@ -1,6 +1,6 @@
 # 本地压力测试与性能分析
 
-以 `2e079f8` / `d01d01b` 的 kernel 为参照：用户反馈其通过线上全部 15 项，耗时表保存在 [线上记录](ONLINE_BASELINE.md)。当前候选已开始 [并行归约优化](PARALLEL_REDUCTION.md)，需对比同一用例并重新验证。线上仍只复制 kernel 或依赖的 `.asc` / `.h`，本地工具不提交。
+已验证参照包括 `2e079f8` / `d01d01b` 和并行归约 `72abad1`，用户反馈均通过线上全部 15 项，耗时表保存在 [线上记录](ONLINE_BASELINE.md)。当前 [Matmul 分块候选](MATMUL_TILING.md) 需对比同一用例并重新验证，可用 `CANN_MATMUL_TILE` 在本地固定分块，报告记录实际 tile、任务数和核数。线上仍只复制 kernel 或依赖的 `.asc` / `.h`，本地工具不提交。
 
 ## 先运行这些命令
 

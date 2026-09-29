@@ -71,6 +71,18 @@ def cases_for_suite(suite):
         cases.append(dict(name=f"{name}_{dtype}_{int(ta)}{int(tb)}", b=b, m=m, n=n, k=k,
                           dtype=dtype, ta=ta, tb=tb, pattern=pattern, seed=20260929))
 
+    if suite == "tiling":
+        for dtype in ("fp16", "bf16"):
+            for ta in (False, True):
+                for tb in (False, True):
+                    for b, m, n, k, pattern in ((4, 129, 257, 24, "random"),
+                                                (8, 127, 129, 40, "negative"),
+                                                (4, 65, 129, 8, "random"),
+                                                (24, 63, 127, 256, "random")):
+                        add(f"tile_m{m}_n{n}", (b, m, n, k), dtype, ta, tb, pattern)
+            add("tile_long_k", (4, 129, 129, 2048), dtype, True, False)
+        return cases
+
     if suite == "reduction":
         for dtype in ("fp16", "bf16"):
             for ta in (False, True):
@@ -159,6 +171,29 @@ def read_f32(path, count):
     return np.fromfile(path, dtype="<f4")
 
 
+def read_matmul_plan(directory, case):
+    path = directory / "matmul_plan.json"
+    if not path.exists():
+        return None  # Older runners have no plan metadata; never invent one.
+    plan = json.loads(path.read_text())
+    tiles = {"32x64": (32, 64), "32x128": (32, 128), "64x128": (64, 128), "128x128": (128, 128)}
+    if not isinstance(plan, dict) or plan.get("policy") not in ("auto", *tiles):
+        raise ValueError("invalid Matmul policy metadata")
+    keys = ("tile_m", "tile_n", "tasks", "blocks", "available_cores")
+    if any(type(plan.get(key)) is not int or plan[key] < 1 for key in keys):
+        raise ValueError("invalid Matmul plan dimensions/counts")
+    tile = (plan["tile_m"], plan["tile_n"])
+    if tile not in tiles.values() or (plan["policy"] != "auto" and tiles[plan["policy"]] != tile):
+        raise ValueError("Matmul tile does not match policy")
+    tasks = case["b"] * ((case["m"] + tile[0] - 1) // tile[0]) * ((case["n"] + tile[1] - 1) // tile[1])
+    if plan["tasks"] != tasks or plan["blocks"] != min(plan["available_cores"], tasks):
+        raise ValueError("Matmul plan does not match case grid")
+    reference_tasks = case["b"] * ((case["m"] + 31) // 32) * ((case["n"] + 63) // 64)
+    if plan["policy"] == "auto" and plan["blocks"] != min(plan["available_cores"], reference_tasks):
+        raise ValueError("automatic Matmul plan lost reference parallelism")
+    return plan
+
+
 def run_case(binary, case, directory, device, repeat, timeout, dump_similarity, benchmark=None):
     result = dict(case=case, status="FAIL", online_evaluation="NOT_RUN")
     start = time.monotonic()
@@ -172,6 +207,9 @@ def run_case(binary, case, directory, device, repeat, timeout, dump_similarity, 
             process = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=timeout)
         if process.returncode:
             raise ValueError(f"runner exit={process.returncode}; see runtime.log")
+        plan = read_matmul_plan(directory, case)
+        if plan is not None:
+            result["matmul_plan"] = plan
         outputs = []
         result["precision"] = []
         for index in range(repeat):
@@ -201,7 +239,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--suite", choices=("smoke", "full", "reduction"), default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "full", "reduction", "tiling"), default="smoke")
     parser.add_argument("--case", help="run exactly one named case from the selected suite")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--repeat", type=int, default=2)

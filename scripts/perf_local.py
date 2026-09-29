@@ -168,7 +168,7 @@ def sha256(path):
 def provenance(binary):
     environment = {key: os.environ.get(key) for key in (
         "ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME", "ASCEND_VISIBLE_DEVICES",
-        "ASCEND_RT_VISIBLE_DEVICES", "NPU_ARCH")}
+        "ASCEND_RT_VISIBLE_DEVICES", "NPU_ARCH", "CANN_MATMUL_TILE")}
     result = dict(git=capture(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
                   git_status=capture(["git", "-C", str(ROOT), "status", "--short"]),
                   kernel_sha256=sha256(ROOT / "kernel.asc"), environment=environment,
@@ -238,6 +238,9 @@ def collect_profile(args, case, directory):
     result = read_profile(output)
     result.update(command=command, application_command=app, saved_launcher=str(launcher),
                   precision=precision, metrics_set=args.metrics)
+    plan = baseline.read_matmul_plan(directory, case)
+    if plan is not None:
+        result["matmul_plan"] = plan
     return result
 
 
@@ -247,10 +250,13 @@ def write_reports(report, output):
              "Host call = run_kernel + stream completion; includes tiling/alloc/free. "
              "Input/output copies, validation and file I/O are outside the interval. "
              "Separate profiler task durations include instrumentation and first calls; do not subtract the two.", "",
-             "| Case | Status | Host median μs | Host p95 μs | Samples |", "|---|---|---:|---:|---:|"]
+             "| Case | Status | Tile; tasks/blocks | Host median μs | Host p95 μs | Samples |",
+             "|---|---|---|---:|---:|---:|"]
     for result in report["results"]:
         stats = result.get("host_call", {})
-        lines.append(f"| {result['case']['name']} | {result['status']} | {stats.get('median_us', '—')} | "
+        plan = result.get("matmul_plan")
+        tile = f"{plan['tile_m']}×{plan['tile_n']}; {plan['tasks']}/{plan['blocks']}" if plan else "—"
+        lines.append(f"| {result['case']['name']} | {result['status']} | {tile} | {stats.get('median_us', '—')} | "
                      f"{stats.get('p95_us', '—')} | {stats.get('samples', '—')} |")
     for result in report["results"]:
         if "error" in result:
@@ -341,6 +347,8 @@ def main():
                     result["host_call"] = read_host_timings(directory / "host_timings.csv", args.warmup, args.iterations)
                     if args.profile != "none":
                         result["profile"] = collect_profile(args, case, directory / "profile_run")
+                        if result.get("matmul_plan") != result["profile"].get("matmul_plan"):
+                            raise ValueError("profile and host measurement used different Matmul plans")
                 except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                     result.update(status="FAIL", error=str(error))
             (directory / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")

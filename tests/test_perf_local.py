@@ -91,8 +91,13 @@ class PerformanceTests(unittest.TestCase):
             root = Path(tmp)
             runner = root / "fixture runner $(not_a_command)"
             runner.write_text(f"#!{sys.executable}\n" + '''
-import pathlib, sys
+import json, os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
+profile_override = os.environ.get('DIFFERENT_PROFILE_TILE') and len(sys.argv) == 5
+plan = dict(policy='32x128' if profile_override else 'auto', tile_m=32,
+            tile_n=128 if profile_override else 64, tasks=12 if profile_override else 18,
+            blocks=12 if profile_override else 18, available_cores=24)
+(p / 'matmul_plan.json').write_text(json.dumps(plan))
 for i in range(int(sys.argv[3])):
     (p / f'y-{i}.bin').write_bytes((p / 'golden_y.bin').read_bytes())
 if len(sys.argv) == 7:
@@ -115,13 +120,14 @@ duration = 'nan' if os.environ.get('BAD_PROFILE') else '3'
                                     f'fixture,MIX_AIC,{duration},0.25\\n')
 ''')
             profiler.chmod(0o755)
-            for bad in (False, True):
-                out = root / ("bad" if bad else "good")
+            for fault in (None, "BAD_PROFILE", "DIFFERENT_PROFILE_TILE"):
+                bad = fault is not None
+                out = root / (fault or "good")
                 env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"])
-                if bad:
-                    env["BAD_PROFILE"] = "1"
-                else:
-                    env.pop("BAD_PROFILE", None)
+                for variable in ("BAD_PROFILE", "DIFFERENT_PROFILE_TILE"):
+                    env.pop(variable, None)
+                if fault:
+                    env[fault] = "1"
                 command = [sys.executable, str(SCRIPTS / "perf_local.py"), "--binary", str(runner),
                            "--output-dir", str(out), "--case", "layout_fp16_00", "--iterations", "3",
                            "--warmup", "1", "--profile", "timeline", "--profile-repeat", "2"]
@@ -134,6 +140,8 @@ duration = 'nan' if os.environ.get('BAD_PROFILE') else '3'
                 if not bad:
                     self.assertEqual(case_result["host_call"]["samples"], 3)
                     self.assertEqual(case_result["profile"]["groups"][0]["task_duration"]["median_us"], 3)
+                    self.assertEqual(case_result["matmul_plan"], case_result["profile"]["matmul_plan"])
+                    self.assertEqual(case_result["matmul_plan"]["tasks"], 18)
                     self.assertTrue((out / "report.md").is_file())
 
 
