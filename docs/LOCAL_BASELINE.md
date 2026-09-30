@@ -109,3 +109,12 @@ bash scripts/run_local.sh --generate-only --suite full
 - [SetOrgShape：输入跨度与输出跨度](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0651.html)
 - [系统 workspace](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0171.html)
 - [PlatformAscendCManager](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_1039.html)
+
+
+## R8 路径记录（可选诊断，不是提交前置条件）
+
+默认自动分派。`CANN_EXECUTION_FAMILY=gm|small|auto` 仅在本地 runner 使用，线上入口不读取环境变量。强制 small 遇到不支持的尺寸/布局会明确报错；与固定 `CANN_MATMUL_TILE` 冲突也报错。固定 tile + auto 走 GM；tile sweep 自动强制 GM。
+
+`execution_plan.json` schema 3 记录实际算法族、变体、任务/核数、输入身份和资源；GM 继续输出旧 `matmul_plan.json`。small 的 `similarity_available=false` 表示核内直接产出 y，没有中间矩阵回读；最终输出精度、重复一致性、输入不变和 guard 检查仍保留。
+
+`--suite small` 用规则生成各维边界并交叉两 dtype/四布局，包含命中和回退，不代表线上点的真实 shape。CPU 替身只能检查地址和逻辑，不能证明 CANN 指令/流水/舍入行为。本轮按用户要求直接等待线上结果，不安排额外 NPU 采样。
