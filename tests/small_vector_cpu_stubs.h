@@ -25,12 +25,13 @@ enum class HardEvent { V_S, S_V, V_MTE2, S_MTE3, MTE3_S };
 enum class RoundMode { CAST_NONE };
 enum class ReduceOrder { ORDER_ONLY_VALUE };
 static uint32_t blockIdx=0, blockNum=1;
+static uint64_t vectorToScalar=0, repeatedMulCalls=0;
 static std::map<uintptr_t,uint32_t> owners;
 inline uint32_t GetBlockIdx(){return blockIdx;}
 inline uint32_t GetBlockNum(){return blockNum;}
 template<int> void PipeBarrier(){}
 template<HardEvent> void SetFlag(int){}
-template<HardEvent> void WaitFlag(int){}
+template<HardEvent event> void WaitFlag(int){if(event==HardEvent::V_S)++vectorToScalar;}
 struct Storage { std::vector<uint8_t> bytes, valid; explicit Storage(size_t n):bytes(n),valid(n){} };
 template<typename T> struct LocalTensor {
     std::shared_ptr<Storage> s; size_t offset=0;
@@ -81,12 +82,27 @@ template<typename T> void DataCopyPad(GlobalTensor<T> dst,LocalTensor<T> src,Dat
 template<typename T> void Cast(LocalTensor<float> d,LocalTensor<T>s,RoundMode,uint32_t n){for(uint32_t i=0;i<n;++i)d.SetValue(i,float(s.GetValue(i)));}
 inline void Duplicate(LocalTensor<float>d,float v,uint32_t n){for(uint32_t i=0;i<n;++i)d.SetValue(i,v);}
 inline void Mul(LocalTensor<float>d,LocalTensor<float>a,LocalTensor<float>b,uint32_t n){assert(a.offset%32==0&&b.offset%32==0);for(uint32_t i=0;i<n;++i)d.SetValue(i,a.GetValue(i)*b.GetValue(i));}
+struct BinaryRepeatParams {
+    uint8_t dstBlkStride,src0BlkStride,src1BlkStride,dstRepStride,src0RepStride,src1RepStride;
+};
+inline void Mul(LocalTensor<float>d,LocalTensor<float>a,LocalTensor<float>b,uint64_t mask,uint8_t repeats,const BinaryRepeatParams& p){
+    assert(mask>0&&mask<=64&&repeats>0&&repeats<=64);
+    assert(d.offset%32==0&&a.offset%32==0&&b.offset%32==0);
+    ++repeatedMulCalls;
+    for(uint32_t r=0;r<repeats;++r)for(uint32_t i=0;i<mask;++i){
+        auto at=[r,i](uint8_t block,uint8_t repeat){return r*repeat*8+(i/8)*block*8+i%8;};
+        d.SetValue(at(p.dstBlkStride,p.dstRepStride),a.GetValue(at(p.src0BlkStride,p.src0RepStride))*b.GetValue(at(p.src1BlkStride,p.src1RepStride)));
+    }
+}
 inline void Muls(LocalTensor<float>d,LocalTensor<float>a,float b,uint32_t n){assert(a.offset%32==0);for(uint32_t i=0;i<n;++i)d.SetValue(i,a.GetValue(i)*b);}
-inline void Add(LocalTensor<float>d,LocalTensor<float>a,LocalTensor<float>b,uint32_t n){for(uint32_t i=0;i<n;++i)d.SetValue(i,a.GetValue(i)+b.GetValue(i));}
+inline void Add(LocalTensor<float>d,LocalTensor<float>a,LocalTensor<float>b,uint32_t n){assert(d.offset%32==0&&a.offset%32==0&&b.offset%32==0);for(uint32_t i=0;i<n;++i)d.SetValue(i,a.GetValue(i)+b.GetValue(i));}
 inline void WholeReduceSum(LocalTensor<float>d,LocalTensor<float>s,int mask,int repeats,int ds,int bs,int rs){
-    assert(mask>0&&mask<=64&&repeats==1&&ds==1&&bs==1&&rs==8&&s.offset%32==0);
-    float a[64]={};for(int i=0;i<mask;++i)a[i]=s.GetValue(i);
-    for(int width=64;width>1;width/=2)for(int i=0;i<width/2;++i)a[i]=a[2*i]+a[2*i+1];d.SetValue(0,a[0]);
+    assert(mask>0&&mask<=64&&repeats>0&&repeats<=255&&ds>0&&s.offset%32==0&&d.offset%4==0);
+    for(int r=0;r<repeats;++r){
+        float a[64]={};for(int i=0;i<mask;++i)a[i]=s.GetValue(r*rs*8+(i/8)*bs*8+i%8);
+        for(int width=64;width>1;width/=2)for(int i=0;i<width/2;++i)a[i]=a[2*i]+a[2*i+1];
+        d.SetValue(r*ds,a[0]);
+    }
 }
 inline void WholeReduceMax(LocalTensor<float>d,LocalTensor<float>s,int mask,int repeats,int ds,int bs,int rs,ReduceOrder){
     assert(mask>0&&mask<=64&&repeats==1&&ds==1&&bs==1&&rs==8&&s.offset%32==0);

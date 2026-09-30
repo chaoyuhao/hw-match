@@ -108,8 +108,16 @@ def validate_execution(plan, case):
         align = lambda x: (x + 15) // 16 * 16
         a_elements = m*align(k) if dot or not case['ta'] else k*align(m)
         b_elements = n*align(k) if dot else k*align(n)
-        used = 6*(a_elements+b_elements)+1344
-        if type(plan.get('ub_used')) is not int or plan['ub_used'] != used or used > min(65536,plan['ub_bytes']-32768):
+        legacy_used = 6*(a_elements+b_elements)+1344
+        columns = plan.get('dot_columns', 0)  # Older schema-3 reports use the original Dot.
+        if type(columns) is not int or columns < 0:
+            raise ValueError('invalid batched Dot column count')
+        if columns and (not dot or not 2 <= columns <= n or (columns != n and columns % 8)):
+            raise ValueError('batched Dot column alignment/layout mismatch')
+        used = (6*(a_elements+b_elements)+4*(columns*64+(columns+7)//8*8)+288
+                if columns else legacy_used)
+        limit = min(65536,plan['ub_bytes']-32768)
+        if type(plan.get('ub_used')) is not int or plan['ub_used'] != used or max(used,legacy_used) > limit:
             raise ValueError('small resource accounting mismatch')
         if plan['tasks'] != (b+7)//8 or 'matmul' in plan:
             raise ValueError('small tasks or unexpected Matmul metadata')

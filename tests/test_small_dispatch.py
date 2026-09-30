@@ -74,6 +74,8 @@ int main(){using local_baseline::ExecutionFamily;
  run(1,3,5,8,true,true,ExecutionFamily::Small,false,true);
  run(1,1,1,32,false,false,ExecutionFamily::Small,false,true,{32,64});
  run(33,1,16,8,false,true,ExecutionFamily::Auto,true);
+ run(1,2,16,64,false,true,ExecutionFamily::Auto,true);
+ run(1,1,64,128,false,true,ExecutionFamily::Auto,true);
  run(192,1,1,8,false,false,ExecutionFamily::Auto,true);
  run(193,1,1,8,false,false,ExecutionFamily::Auto,false);
  run(1,17,1,8,false,false,ExecutionFamily::Auto,true);
@@ -92,6 +94,7 @@ int main(){using local_baseline::ExecutionFamily;
             done=subprocess.run([str(binary)],capture_output=True,text=True)
             self.assertEqual(done.returncode,0,done.stderr)
             rows=[json.loads(line) for line in done.stdout.splitlines()]
-            self.assertEqual(len(rows),14)
+            self.assertEqual(len(rows),16)
+            self.assertTrue({16,32} <= {row.get('dot_columns') for row in rows})
             for row in rows:
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)

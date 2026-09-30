@@ -15,7 +15,7 @@ int main() {
   auto s = MakeSmallPlan({9,3,5,8,dtype,ta,tb},h);
   assert(s.variant == (ta && tb ? SmallVariant::None : tb ? SmallVariant::Dot : SmallVariant::Rows));
   if(s.variant != SmallVariant::None) {
-   assert(s.tasks==2 && s.blocks==2 && s.ubBytes==6*(s.aElements+s.bElements)+1344);
+   assert(s.tasks==2 && s.blocks==2 && s.ubBytes==6*(s.aElements+s.bElements)+4*(s.productElements+s.partialElements)+288);
    assert(s.aPitch%16==0 && s.bPitch%16==0);
   }
   assert(MakeSmallPlan({1,1,1,8,dtype,ta,tb},h).variant==SmallVariant::Dot);
@@ -72,7 +72,7 @@ int main() {
  assert(!UseSmallAutomatically({largestB,1,1,8,1,false,false},largest));
  assert(MakeSmallPlan({largestB+1,1,1,8,1,false,false},h).variant==SmallVariant::None);
  auto largeWork=MakeSmallPlan({1,200,64,8,1,false,true},h);
- assert(largeWork.variant==SmallVariant::Dot && largeWork.ubBytes==26688);
+ assert(largeWork.variant==SmallVariant::Dot && largeWork.ubBytes==42272);
  assert(!UseSmallAutomatically({1,200,64,8,1,false,true},largeWork));
  auto fits=MakeSmallPlan({1,1,64,128,1,false,false},h);
  assert(fits.variant==SmallVariant::Rows && fits.ubBytes==51264);
@@ -91,6 +91,49 @@ int main() {
 '''
         with tempfile.TemporaryDirectory() as tmp:
             f=Path(tmp)/'main.cpp'; f.write_text(source); exe=Path(tmp)/'test'
+            done=subprocess.run(['/usr/bin/g++','-std=c++14','-Wall','-Wextra','-Werror','-I',str(ROOT),str(f),'-o',str(exe)],capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stderr)
+            done=subprocess.run([str(exe)],capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stderr)
+
+    def test_batched_dot_adapts_columns_to_real_resources(self):
+        source = r'''
+#include "small_plan.h"
+#include <cassert>
+using namespace local_baseline;
+int main() {
+ HardwareCaps h{24,192*1024};
+ auto tiny=MakeSmallPlan({1,1,5,8,1,false,true},h);
+ assert(tiny.dotColumns==5 && tiny.productElements==320 && tiny.partialElements==8);
+ assert(tiny.ubBytes==2176);
+ ProblemDesc p{1,1,64,128,1,false,true};
+ auto normal=MakeSmallPlan(p,h);
+ assert(normal.dotColumns==32 && normal.ubBytes==58528);
+ auto reduced=MakeSmallPlan(p,{24,32768+54368});
+ assert(reduced.dotColumns==16 && reduced.ubBytes==54368);
+ auto minimum=MakeSmallPlan(p,{24,32768+52288});
+ assert(minimum.dotColumns==8 && minimum.ubBytes==52288);
+ auto old=MakeSmallPlan(p,{24,32768+52287});
+ assert(old.dotColumns==0 && old.ubBytes==51264);
+ assert(old.productElements==256 && old.partialElements==8);
+ assert(MakeSmallPlan(p,{24,32768+51263}).variant==SmallVariant::None);
+ for(uint32_t n=2;n<=64;++n)for(uint32_t k=8;k<=256;k+=8) {
+   ProblemDesc q{1,1,n,k,1,false,true};
+   auto s=MakeSmallPlan(q,h);if(s.variant==SmallVariant::None)continue;
+   assert(s.dotColumns==0 || (s.dotColumns<=n && (s.dotColumns==n || s.dotColumns%8==0)));
+   assert(s.ubBytes==6*(s.aElements+s.bElements)+4*(s.productElements+s.partialElements)+288);
+   assert(s.ubBytes<=65536 && s.partialElements>=8);
+   if(s.dotColumns)assert(s.productElements==s.dotColumns*64 && s.partialElements>=s.dotColumns);
+   // R11 does not widen automatic admission.
+   assert(UseSmallAutomatically(q,s)==(n<=128));
+ }
+ auto single=MakeSmallPlan({1,1,1,128,1,false,true},h);
+ auto rows=MakeSmallPlan({1,1,5,128,1,false,false},h);
+ assert(single.dotColumns==0 && rows.dotColumns==0);
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            f=Path(tmp)/'main.cpp';f.write_text(source);exe=Path(tmp)/'test'
             done=subprocess.run(['/usr/bin/g++','-std=c++14','-Wall','-Wextra','-Werror','-I',str(ROOT),str(f),'-o',str(exe)],capture_output=True,text=True)
             self.assertEqual(done.returncode,0,done.stderr)
             done=subprocess.run([str(exe)],capture_output=True,text=True)

@@ -78,3 +78,18 @@ class ExecutionMetadataTests(unittest.TestCase):
             if accepted:self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
             else:
                 with self.assertRaises(ValueError):plan_metadata.validate_execution(plan,case)
+
+    def test_batched_dot_metadata_and_legacy_compatibility(self):
+        case=dict(self.case,n=5,tb=True)
+        plan=dict(self.plan,problem=plan_metadata.problem(case),dot_columns=5,ub_used=2176)
+        self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
+        for bad in (dict(dot_columns=1),dict(dot_columns=4),dict(dot_columns=6),dict(dot_columns=True),
+                    dict(dot_columns=None),dict(ub_used=2175),dict(ub_bytes=32768+2175)):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):
+                plan_metadata.validate_execution(dict(plan,**bad),case)
+        # Missing field continues to mean the original Dot implementation.
+        legacy=dict(plan,ub_used=1920);del legacy['dot_columns']
+        self.assertEqual(plan_metadata.validate_execution(legacy,case),legacy)
+        case=dict(case,n=64,k=128)
+        plan.update(problem=plan_metadata.problem(case),dot_columns=32,ub_used=58528)
+        self.assertEqual(plan_metadata.validate_execution(plan,case),plan)

@@ -9,6 +9,8 @@ struct SmallPlan {
     uint32_t aRows = 0, aWidth = 0, aPitch = 0, aElements = 0;
     uint32_t bRows = 0, bWidth = 0, bPitch = 0, bElements = 0;
     uint32_t ubBytes = 0, tasks = 0, blocks = 0;
+    // Zero keeps the scalar-per-dot implementation; otherwise columns per repeat group.
+    uint32_t dotColumns = 0, productElements = 256, partialElements = 8;
 };
 inline SmallPlan MakeSmallPlan(const ProblemDesc& p, const HardwareCaps& caps)
 {
@@ -39,6 +41,26 @@ inline SmallPlan MakeSmallPlan(const ProblemDesc& p, const HardwareCaps& caps)
     // Input queues + decoded FP32 inputs + 256/64 float work + 2x32-byte buffers.
     s.ubBytes=6*(s.aElements+s.bElements)+1344;
     if (caps.ubBytes<=32768 || s.ubBytes>std::min<uint64_t>(65536,caps.ubBytes-32768)) return {};
+    // Compare legal column tiles by vector issue count, then scratch size. This
+    // is a structural estimate, not a calibrated latency or cross-family model.
+    // Keep legacy admission above: extra scratch must never eject an old small case.
+    if (s.variant == SmallVariant::Dot && p.n > 1) {
+        const uint64_t limit = std::min<uint64_t>(65536,caps.ubBytes-32768);
+        const uint32_t chunks = CeilDiv(p.k,64);
+        uint32_t bestCalls = std::numeric_limits<uint32_t>::max();
+        for (uint32_t width=8; width<=64; width*=2) {
+            const uint32_t columns = std::min(p.n,width);
+            const uint32_t products = columns*64;
+            const uint32_t partials = CeilDiv(columns,8)*8;
+            const uint32_t used = 6*(s.aElements+s.bElements)+4*(products+partials)+288;
+            const uint32_t calls = CeilDiv(p.n,columns)*(3*chunks-1)+1;
+            if (used<=limit && (calls<bestCalls || (calls==bestCalls && used<s.ubBytes))) {
+                bestCalls=calls; s.dotColumns=columns;
+                s.productElements=products; s.partialElements=partials; s.ubBytes=used;
+            }
+            if (columns==p.n) break;
+        }
+    }
     s.tasks=static_cast<uint32_t>(groups);
     s.blocks=std::min(s.tasks,caps.cores);
     return s;

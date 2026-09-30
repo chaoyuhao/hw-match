@@ -19,9 +19,9 @@ public:
         pipe.InitBuffer(bQueue_, 1, plan.bElements * sizeof(T));
         pipe.InitBuffer(aFloat_, plan.aElements * sizeof(float));
         pipe.InitBuffer(bFloat_, plan.bElements * sizeof(float));
-        pipe.InitBuffer(product_, 256 * sizeof(float));
+        pipe.InitBuffer(product_, plan.productElements * sizeof(float));
         pipe.InitBuffer(temp_, 64 * sizeof(float));
-        pipe.InitBuffer(partial_, 32);
+        pipe.InitBuffer(partial_, plan.partialElements * sizeof(float));
         pipe.InitBuffer(output_, 32);
     }
     __aicore__ inline void Process()
@@ -78,6 +78,7 @@ private:
     }
     __aicore__ inline float DotRow(uint32_t row)
     {
+        if (plan_.dotColumns) return BatchedDotRow(row);
         using namespace AscendC;
         auto a = aFloat_.template Get<float>();
         auto b = bFloat_.template Get<float>();
@@ -99,6 +100,44 @@ private:
             if (col == 0 || value > maximum) maximum = value;
             Fence<HardEvent::S_V>();
         }
+        return maximum;
+    }
+    __aicore__ inline float BatchedDotRow(uint32_t row)
+    {
+        using namespace AscendC;
+        auto a = aFloat_.template Get<float>();
+        auto b = bFloat_.template Get<float>();
+        auto product = product_.template Get<float>();
+        auto scores = temp_.template Get<float>();
+        auto partial = partial_.template Get<float>();
+        for (uint32_t first = 0; first < n_; first += plan_.dotColumns) {
+            const uint32_t columns = n_ - first < plan_.dotColumns ? n_ - first : plan_.dotColumns;
+            for (uint32_t begin = 0; begin < k_; begin += 64) {
+                const uint32_t mask = k_ - begin < 64 ? k_ - begin : 64;
+                // Repeat over B rows (logical N). Reuse the same A segment;
+                // scratch rows each hold one 64-float segment and are reused in K.
+                Mul(product, a[row * plan_.aPitch + begin], b[first * plan_.bPitch + begin],
+                    static_cast<uint64_t>(mask), static_cast<uint8_t>(columns),
+                    {1, 1, 1, 8, 0, static_cast<uint8_t>(plan_.bPitch / 8)});
+                PipeBarrier<PIPE_V>();
+                if (begin == 0) {
+                    // Reduction destination stride is in elements, not 32-byte blocks.
+                    WholeReduceSum(scores[first], product, mask, columns, 1, 1, 8);
+                    PipeBarrier<PIPE_V>();
+                } else {
+                    WholeReduceSum(partial, product, mask, columns, 1, 1, 8);
+                    PipeBarrier<PIPE_V>();
+                    // Preserve the old left-to-right order of 64-element K partials.
+                    Add(scores[first], scores[first], partial, columns);
+                    PipeBarrier<PIPE_V>();
+                }
+            }
+        }
+        // All K segments are complete before Max. Padding never participates.
+        WholeReduceMax(partial, scores, n_, 1, 1, 1, 8, ReduceOrder::ORDER_ONLY_VALUE);
+        Fence<HardEvent::V_S>();
+        const float maximum = partial.GetValue(0);
+        Fence<HardEvent::S_V>();
         return maximum;
     }
     __aicore__ inline float VectorRow(uint32_t row)
