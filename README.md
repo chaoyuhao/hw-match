@@ -1,10 +1,10 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S6 按对话关联 R10：15/15 通过，点 2 从 12.61→11.31 μs（-10.31%），点 1 保持约 3.8 μs，其余变化较小。平台源码哈希未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S7 按对话关联 R11：15/15 通过；相对 S6，13 点变慢、2 点略快，点 1 +10.18%、点 5 +5.34%，未观察到批量 Dot 的性能收益。平台源码哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前待评测版本 **R11**（代码 `9aa9f56`）：多列 Dot 改为 repeat 批量点积，在 Vector 内累加 K 分段并求行最大值，每行只进行一次标量交接；列块由 N/K/UB 决定。small/GM 自动分派范围保持 R10，Rows 与 N=1 沿用原实现。相对 R10，线上需同时替换 **small_plan.h、small_vector.h**。等待 S7，不能沿用 S6 的通过记录。
+当前源码版本 **R11**（代码 `9aa9f56`）：多列 Dot 改为 repeat 批量点积，在 Vector 内累加 K 分段并求行最大值，每行只进行一次标量交接；列块由 N/K/UB 决定。small/GM 自动分派范围保持 R10，Rows 与 N=1 沿用原实现。相对 R10，线上需同时替换 **small_plan.h、small_vector.h**。已收到 S7 精度全部通过，但性能收益未成立。R10/S6 保留为后续对照；本次只更新记录，未回退算子。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
