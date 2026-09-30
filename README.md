@@ -1,16 +1,20 @@
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)：每轮版本、主要改动、验证、完整线上耗时、收益与退化。最新用户反馈 S3 为 15/15 通过，相比上一份完整记录 S2，9 点变快、6 点变慢；按对话关联到 `1cc3cba`，平台源码哈希尚未核验。
+
+逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
+
+下一版优先 [小规模 Vector 快速路径设计](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，目前为设计稿，尚未实现。
+
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
-本地 baseline：运行 `bash scripts/run_local.sh --suite full`，详见 [本地 baseline 说明](docs/LOCAL_BASELINE.md)。已获用户反馈线上 15/15 通过的参照为 `72abad1`，见 [线上记录](docs/ONLINE_BASELINE.md)。当前 kernel 是第二轮 [Matmul 分块候选](docs/MATMUL_TILING.md)，尚待 NPU 和线上验证；新增 `--suite tiling` 的 34 项回归和本地分块对比入口。
+本地 baseline：运行 `bash scripts/run_local.sh --suite full`；规则生成用例使用 `--suite generated --case-count 64`。详见 [本地 baseline](docs/LOCAL_BASELINE.md) 和 [Matmul 规划](docs/MATMUL_TILING.md)。历史版本的本地通过记录不能替代当前代码回归。
 
 本地性能分析：先运行 `bash scripts/run_perf.sh --inspect-tools`，再运行 `bash scripts/run_perf.sh --suite quick`；压力测试、msprof 采集与报告说明见 [性能基础设施](docs/LOCAL_PERFORMANCE.md)。
 
-分块对比采样：运行 `bash scripts/run_perf.sh --suite stress --tile-sweep`，一次构建比较四种固定 tile 和 `auto`；默认两轮并保存 JSON/CSV/Markdown。增加 `--profile timeline` 可比较设备 Task Duration，详见 [分块矩阵采样](docs/MATMUL_TILING.md#一次构建采集分块矩阵)。
+可选分块采样：`bash scripts/run_perf.sh --suite quick --tile-sweep` 从 runner 获取 SDK 接受的候选，默认取前 6 个，再补已接受的 32×64 和 auto，顺序执行两轮。增加 `--profile timeline` 可比较设备 Task Duration，见 [规划与采样说明](docs/MATMUL_TILING.md)。完整采样不是每轮开发的前置条件。
 
-官方资料补充：[cann-learning-hub 调研](docs/LEARNING_HUB_REVIEW.md)，对照当前实现整理 CV 融合示例、源码级仿真、尾轮调度与模板特化；本地资料克隆目录已忽略。
+官方资料补充：[cann-learning-hub 调研](docs/LEARNING_HUB_REVIEW.md)；本地资料克隆目录已忽略。整体优化依据见 [实现架构审计](docs/ARCHITECTURE_AUDIT.md)，最新推进顺序以迭代记录和下一版设计为准。
 
-整体优化方向：[实现架构审计](docs/ARCHITECTURE_AUDIT.md)，逐项对照赛事要求，整理规则规划、多核调度、存储、流水、归约和自动验证的缺口与推进顺序。
-
-已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h` 文件。当前实现只需复制 `kernel.asc`，无需新增文件。
+已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前规则规划版需复制 **kernel.asc 和 matmul_plan.h** 到同目录，其余原始文件保持不变。
 
 本地环境与测试仅用于开发调试；正确性、性能和最终得分以统一线上平台评测为准，环境小算子通过不代表赛题通过。
 

@@ -1,6 +1,6 @@
 # BatchMatmulMaxSum 实现审计与优化方向
 
-第一阶段现已按本审计推进规则规划与自动用例，当前接口和验证边界见 [MATMUL_TILING.md](MATMUL_TILING.md)。下文保留实施前的审计事实。
+第一阶段已完成规则规划与自动用例，最新线上反馈见 [统一迭代记录](ITERATION_LOG.md)。2026-09-30 用户将 [小规模快速路径](superpowers/specs/2026-09-30-small-vector-fast-path-design.md) 提前为下一版重点；下文保留实施前的审计事实及原始阶段建议，当前优先级以迭代记录为准。
 
 审计日期：2026-09-30；代码参照 `74d810c`。本次检查 README、kernel、runner、测试生成和采样器，不修改执行代码，不产生新的设备性能结论。
 

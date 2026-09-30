@@ -1,6 +1,6 @@
 # 规则生成 Matmul 计划：第一阶段
 
-2026-09-30：替换四种固定候选的选择器。当前候选尚需 CANN 9.1 本地编译、NPU 精度回归及 CANN 9.0 线上评测；主机测试不能证明提速。旧四候选设计与实验记录可在 `a220315` 的此文件中查看。
+2026-09-30：替换四种固定候选的选择器。用户最新反馈线上 15/15 通过，按对话关联到 `1cc3cba`；完整逐点收益、退化及版本关联限制统一见 [迭代记录 S3](ITERATION_LOG.md)。本轮尚无独立的本地 CANN/NPU 全套回归报告；主机测试不能代替这些结果。旧四候选设计与实验记录可在 `a220315` 的此文件中查看。
 
 ## 规划与执行边界
 
@@ -80,6 +80,6 @@ bash scripts/run_perf.sh --suite generated --case-count 64 --tile-sweep --genera
 
 ## 后续扩展契约
 
-新增融合/流水算法时，先定义计划中的 owner、N 分片、结果缓冲和同步参与者，再加入候选族与资源检查。不要仅增加 tile 名称。第二阶段首先实现逐块 Matmul → 行最大值；第三阶段再开展双缓冲、固定结构求和及小规模路径。详细依赖见 [架构审计](ARCHITECTURE_AUDIT.md)。
+新增融合/流水算法时，先定义计划中的 owner、N 分片、结果缓冲和同步参与者，再加入候选族与资源检查。不要仅增加 tile 名称。最新优先级已调整：先验证 [小规模 Vector 快路径](superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，再开展逐块 Matmul → 行最大值融合、双缓冲和固定结构求和。当前通用路径作为快路径的回退；原始依赖审计见 [架构审计](ARCHITECTURE_AUDIT.md)。
 
 接口实现参考用户克隆的官方 learning hub 中 `02.06/add_custom_template.asc` 的 `GetCoreMemSize`，以及 `03.05/matmul_abs.asc` 的 TCubeTiling 基本块访问；以实际安装 SDK 编译结果为准。

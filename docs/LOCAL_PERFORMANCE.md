@@ -1,6 +1,6 @@
 # 本地压力测试与性能分析
 
-已验证参照包括 `2e079f8` / `d01d01b` 和并行归约 `72abad1`，用户反馈均通过线上全部 15 项，耗时表保存在 [线上记录](ONLINE_BASELINE.md)。当前 [Matmul 分块候选](MATMUL_TILING.md) 需对比同一用例并重新验证，可用 `CANN_MATMUL_TILE` 在本地固定分块，报告记录实际 tile、任务数和核数。线上仍只复制 kernel 或依赖的 `.asc` / `.h`，本地工具不提交。
+各轮线上结果统一见 [迭代记录](ITERATION_LOG.md)，最新 S3 用户反馈为 15/15 通过。当前 [规则规划版](MATMUL_TILING.md) 可用 `CANN_MATMUL_TILE` 在本地固定分块；本地对比仍需使用相同输入与计时口径，不能沿用历史本地性能。线上只复制 kernel 及其依赖的 `.asc` / `.h`，本地工具不提交。
 
 批量比较同一输入的 SDK 接受候选与 `auto`，使用 `bash scripts/run_perf.sh --suite stress --tile-sweep`；自动用例、实验轮次、设备计时和 CSV 字段见 [规划与采样说明](MATMUL_TILING.md)。
 

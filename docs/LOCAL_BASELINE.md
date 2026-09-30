@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前 kernel 是在 `72abad1` 基础上的 [Matmul 分块候选](MATMUL_TILING.md)，尚待真实 CANN/NPU 验证；新增 `--suite tiling` 的 34 项回归。参照 `72abad1` 的本地 CANN 9.1.0 / 910B2C 大 M 性能用例已通过，用户反馈线上 15/15 通过，详见 [第一轮归约优化](PARALLEL_REDUCTION.md) 和 [线上对比](ONLINE_BASELINE.md)。这些记录不能替代当前候选的回归。
+当前规则规划版按对话关联到 `1cc3cba`，用户反馈线上 15/15 通过；各轮性能与退化统一见 [迭代记录](ITERATION_LOG.md)。此前 `72abad1` 的本地 CANN 9.1.0 / 910B2C 大 M 单例已通过，算法见 [并行归约](PARALLEL_REDUCTION.md)。目前尚无当前版本地全套 NPU 回归报告，历史记录不能沿用为新版完整通过证据。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -16,7 +16,7 @@
 
 用户只替换 `0624c72` 的 `kernel.asc` 后，收到“提交代码中存在不合规内容，请检查并删除后提交。如需Debug请在本地进行。”，没有具体函数或行号。因此只能提出待验证的假设：原提交文件中的显式打印、退出或诊断数据回读被检查到。尚无证据确认具体命中项。
 
-`2e079f8` 清理时删除了 `kernel.asc` 中的 `fprintf`、`abort`、诊断 `aclrtMemcpy` / `aclrtMemset` 及相关头文件。所有打印、诊断回读和文件输出均在 `local/runner.asc` 中。内部执行函数返回已完成计算的设备 scratch 所有权：正式入口直接释放；本地 runner 可在释放前回读。提交文件不包含宏隐藏的调试分支，也不依赖本地 runner。当时的设备计算和同步代码与 `0624c72` 逐字节一致；清理后用户反馈提交成功，具体触发拒绝的内容仍未确认。本轮候选已修改归约和跨核同步，需要重新回归。
+`2e079f8` 清理时删除了 `kernel.asc` 中的 `fprintf`、`abort`、诊断 `aclrtMemcpy` / `aclrtMemset` 及相关头文件。所有打印、诊断回读和文件输出均在 `local/runner.asc` 中。内部执行函数返回已完成计算的设备 scratch 所有权：正式入口直接释放；本地 runner 可在释放前回读。提交文件不包含宏隐藏的调试分支，也不依赖本地 runner。当时的设备计算和同步代码与 `0624c72` 逐字节一致；清理后用户反馈提交成功，具体触发拒绝的内容仍未确认。后续算法改动应独立回归，不能沿用提交清理时的结果。
 
 ACL、参数或 tiling 错误仍会抛出异常，不被吞掉。若 stream 持续同步失败，scratch 不提前释放，由设备 context 清理；本地 runner 在输入/输出缓冲析构前检查 stream，必要时终止测试进程。已用 mock ACL 的 C++14 检查验证返回值移动、正常释放、异常恢复及同步持续失败四种所有权路径；这不验证 NPU 或平台规则。
 
