@@ -4,6 +4,8 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
+当前待评测版本 **R9 `c95ee32`**：两个自动工作量门槛扩大 8 倍（Dot 16→128、Rows 32→256），其他限制和计算不变。相对刚提交的 R8，只需更新 `small_plan.h`；尚无 R9 线上结果。
+
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
 本地 baseline：运行 `bash scripts/run_local.sh --suite full`；规则生成用例使用 `--suite generated --case-count 64`。详见 [本地 baseline](docs/LOCAL_BASELINE.md) 和 [Matmul 规划](docs/MATMUL_TILING.md)。历史版本的本地通过记录不能替代当前代码回归。
