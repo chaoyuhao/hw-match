@@ -1,8 +1,8 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)：每轮版本、主要改动、验证、完整线上耗时、收益与退化。最新用户反馈 S3 为 15/15 通过，相比上一份完整记录 S2，9 点变快、6 点变慢；按对话关联到 `1cc3cba`，平台源码哈希尚未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)：每轮版本、主要改动、验证、完整线上耗时、收益与退化。最新用户反馈 S4 为 15/15 通过；相比 S3，第 1 点从 12.38 降到 3.81 μs（快 3.25 倍），其他点没有同等级明显收益。按对话关联到 R8 `2663797`，平台源码哈希尚未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
-R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。当前为待线上验证候选；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
+R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
