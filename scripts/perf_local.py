@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Local stress tests and msprof collection; never an official score estimator."""
+import case_rules
 import argparse
 import csv
 import hashlib
@@ -117,7 +118,7 @@ def read_profile(directory):
 
 
 def case_identity(case):
-    return tuple(case[key] for key in ("b", "m", "n", "k", "dtype", "ta", "tb", "pattern", "seed"))
+    return case_rules.identity(case)
 
 
 def compare_reports(new, old):
@@ -178,7 +179,8 @@ def provenance(binary):
                   source_sha256={str(p.relative_to(ROOT)): sha256(p) for p in (
                       ROOT / "local/runner.asc", ROOT / "local/CMakeLists.txt",
                       ROOT / "scripts/local_baseline.py", ROOT / "scripts/perf_local.py",
-                      ROOT / "scripts/tile_sweep.py")})
+                      ROOT / "scripts/tile_sweep.py", ROOT / "matmul_plan.h",
+                      ROOT / "scripts/case_rules.py", ROOT / "scripts/plan_metadata.py")})
     if binary:
         result["binary"] = str(binary)
         result["binary_sha256"] = sha256(binary)
@@ -295,7 +297,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--suite", choices=("quick", "stress", "regression"), default="quick")
+    parser.add_argument("--suite", choices=("quick", "stress", "regression", "generated"), default="quick")
     parser.add_argument("--case")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=3)
@@ -305,20 +307,24 @@ def main():
     parser.add_argument("--metrics", choices=METRICS, default="PipeUtilization")
     parser.add_argument("--profile-repeat", type=int, default=5)
     parser.add_argument("--compare", type=Path)
-    parser.add_argument("--tile-sweep", action="store_true", help="compare four fixed tiles plus auto, sequentially")
+    parser.add_argument("--tile-sweep", action="store_true", help="compare SDK-discovered tiles plus auto, sequentially")
     parser.add_argument("--sweep-rounds", type=int, default=2, help="tile sweep repetitions with rotated order (default: 2)")
+    parser.add_argument("--sweep-candidates", type=int, default=6, help="top accepted candidates (plus reference and auto), 1..64")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--inspect-tools", action="store_true")
     modes.add_argument("--list-cases", action="store_true")
     modes.add_argument("--generate-only", action="store_true")
+    case_rules.add_arguments(parser)
     args = parser.parse_args()
+    if not 1 <= args.sweep_candidates <= 64:
+        parser.error("--sweep-candidates must be between 1 and 64")
     if not 1 <= args.sweep_rounds <= 20:
         parser.error("--sweep-rounds must be between 1 and 20")
     if args.tile_sweep and (args.compare or args.inspect_tools):
         parser.error("--tile-sweep cannot be combined with --compare or --inspect-tools")
     if args.device < 0 or not 0 <= args.warmup <= 1000 or not 1 <= args.iterations <= 10000 or not 1 <= args.profile_repeat <= 1000 or args.timeout < 1:
         parser.error("invalid device/warmup/iterations/profile-repeat/timeout")
-    cases = performance_cases(args.suite)
+    cases = case_rules.from_arguments(args, parser) if args.suite == "generated" else performance_cases(args.suite)
     if args.case:
         cases = [c for c in cases if c["name"] == args.case]
         if not cases:
@@ -356,6 +362,7 @@ def main():
                   suite=args.suite, options={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                   provenance=provenance(args.binary), results=[])
     shutil.copyfile(ROOT / "kernel.asc", args.output_dir / "kernel_snapshot.asc")
+    shutil.copyfile(ROOT / "matmul_plan.h", args.output_dir / "matmul_plan.h")
     print("LOCAL_PERFORMANCE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     if args.tile_sweep:
         return tile_sweep.run(args, cases, report, measure_case)

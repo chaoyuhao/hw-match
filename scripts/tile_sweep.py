@@ -4,18 +4,41 @@ import json
 import math
 import os
 import statistics
+import subprocess
+import plan_metadata
 
 import local_baseline as baseline
 
-POLICIES = ("32x64", "32x128", "64x128", "128x128", "auto")
-
-
-def jobs(cases, rounds):
+def jobs(cases, rounds, policies):
     for repeat in range(rounds):
         for index, case in enumerate(cases):
-            offset = (index + repeat) % len(POLICIES)
-            for policy in POLICIES[offset:] + POLICIES[:offset]:
+            choices = policies[case['name']]
+            if not choices:
+                continue
+            offset = (index + repeat) % len(choices)
+            for policy in choices[offset:] + choices[:offset]:
                 yield case, repeat + 1, policy
+
+
+def discover(args, case, directory):
+    directory.mkdir(parents=True)
+    fields = [case[k] for k in ('b','m','n','k')] + [1 if case['dtype']=='fp16' else 2, int(case['ta']), int(case['tb'])]
+    (directory / 'case.txt').write_text(' '.join(map(str, fields)) + '\n')
+    (directory / 'case.json').write_text(json.dumps(case) + '\n')
+    path = directory / 'candidates.json'
+    with (directory / 'discovery.log').open('w') as log:
+        done = subprocess.run([str(args.binary), '--list-plans', str(directory), str(args.device), str(path)],
+                              stdout=log, stderr=subprocess.STDOUT, timeout=args.timeout)
+    if done.returncode:
+        raise ValueError(f'candidate discovery exit={done.returncode}; see discovery.log')
+    data = json.loads(path.read_text())
+    accepted = plan_metadata.validate_discovery(data, case)
+    # SDK output is already ordered by C++ heuristic. Limit experiments, not planning.
+    policies = list(accepted)[:args.sweep_candidates]
+    if '32x64' in accepted and '32x64' not in policies:
+        policies.append('32x64')
+    policies.append('auto')
+    return policies, {**accepted, 'auto':data['auto']}, data
 
 
 def device_stats(result, expected_samples=None):
@@ -82,7 +105,8 @@ def summarize(cases, results, policies, rounds):
         candidates = {}
         complete = True
         cores = set()
-        for policy in policies:
+        selected_policies = policies[case["name"]] if isinstance(policies, dict) else policies
+        for policy in selected_policies:
             rows = sorted((r for r in records if r["requested_policy"] == policy), key=lambda r: r["round"])
             candidate = dict(completed_rounds=len(rows))
             candidates[policy] = candidate
@@ -104,7 +128,7 @@ def summarize(cases, results, policies, rounds):
                 complete = False
         if len(cores) != 1:
             complete = False
-        generated = len(records) == len(policies) * rounds and all(r["status"] == "GENERATED" for r in records)
+        generated = bool(records) and all(r["status"] == "GENERATED" for r in records)
         summaries.append(dict(case=case, status="COMPLETE" if complete else "GENERATED" if generated else "INCOMPLETE",
                               candidates=candidates, host=rank(candidates, "host") if complete else None,
                               device=rank(candidates, "device") if complete else None))
@@ -112,7 +136,7 @@ def summarize(cases, results, policies, rounds):
 
 
 def write_reports(report, cases, output):
-    summaries = summarize(cases, report["results"], POLICIES, report["sweep"]["rounds"])
+    summaries = summarize(cases, report["results"], report["sweep"]["policies_by_case"], report["sweep"]["rounds"])
     report["sweep_summary"] = summaries
     (output / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     metric = report["sweep"]["ranking_metric"]
@@ -120,19 +144,15 @@ def write_reports(report, cases, output):
              f"Primary comparison: {metric}; each value is the median of round medians (μs).",
              "Host includes tiling/allocation/synchronization/free; device uses separate profiled Task Duration, "
              "including first calls. Never mix or subtract these timing scopes.", "",
-             "Four fixed tiles plus auto, sequential runs with rotated order. "
+             "SDK-discovered candidates plus auto; sequential runs with rotated order. "
              "near_best: within 3% of best OR overlapping round-median ranges; not statistical significance. "
              "Incomplete/failed comparisons have no winner. Geometry features are not hardware utilization.", "",
-             "| Case | Status | " + " | ".join(POLICIES) + " | Best observed | auto/best | near_best |",
-             "|---|---|" + "---:|" * len(POLICIES) + "---|---:|---|"]
+             "| Case | Status | Candidates | Best observed | auto/best | near_best |",
+             "|---|---|---:|---|---:|---|"]
     csv_rows = []
     for summary in summaries:
         ranking = summary[metric]
-        cells = []
-        for policy in POLICIES:
-            candidate = summary["candidates"][policy]
-            stats = candidate.get(metric)
-            cells.append(f"{stats['median_us']:.3f}" if stats else "—")
+        for policy, candidate in summary["candidates"].items():
             row = dict(case=summary["case"]["name"], **{k: summary["case"][k] for k in
                        ("b", "m", "n", "k", "dtype", "ta", "tb", "pattern", "seed")},
                        policy=policy, status=candidate["status"], comparison_status=summary["status"],
@@ -148,8 +168,8 @@ def write_reports(report, cases, output):
         winner = ranking["best_policy"] if ranking else "—"
         speedup = f"{ranking['speedup_vs_auto']:.3f}" if ranking else "—"
         near = ", ".join(ranking["near_best"]) if ranking else "—"
-        lines.append(f"| {summary['case']['name']} | {summary['status']} | " + " | ".join(cells) +
-                     f" | {winner} | {speedup} | {near} |")
+        lines.append(f"| {summary['case']['name']} | {summary['status']} | {len(summary['candidates'])} "
+                     f"| {winner} | {speedup} | {near} |")
     for result in report["results"]:
         if result.get("error"):
             lines += ["", f"{result['case']['name']} / round {result['round']} / "
@@ -163,45 +183,57 @@ def write_reports(report, cases, output):
 
 
 def run(args, cases, report, measure):
-    report["sweep"] = dict(policies=list(POLICIES), rounds=args.sweep_rounds,
-                           expected_runs=len(cases) * len(POLICIES) * args.sweep_rounds,
-                           ranking_metric="device" if args.profile != "none" else "host",
+    policies, registry = {}, {}
+    report['sweep'] = dict(policies_by_case=policies, rounds=args.sweep_rounds, expected_runs=None,
+                           discovery_pending=args.generate_only, discovery={},
+                           ranking_metric='device' if args.profile != 'none' else 'host',
                            overrides_inherited_CANN_MATMUL_TILE=True)
+    for case in cases:
+        name = case['name']
+        policies[name] = []
+        if args.generate_only:
+            inputs = args.output_dir / name / 'inputs'
+            baseline.make_case(case, inputs)
+            report['results'].append(dict(case=case, status='GENERATED', discovery_pending=True,
+                                         input_directory=str(inputs.relative_to(args.output_dir))))
+        else:
+            try:
+                choices, plans, data = discover(args, case, args.output_dir / name / 'discovery')
+                policies[name], registry[name] = choices, plans
+                report['sweep']['discovery'][name] = data
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                report['results'].append(dict(case=case, status='FAIL', round=0,
+                                             requested_policy='discovery', error=str(error)))
+    if not args.generate_only:
+        report['sweep']['expected_runs'] = sum(map(len, policies.values())) * args.sweep_rounds
     write_reports(report, cases, args.output_dir)
-    old_policy = os.environ.get("CANN_MATMUL_TILE")
+    old_policy = os.environ.get('CANN_MATMUL_TILE')
     try:
-        for case, repeat, policy in jobs(cases, args.sweep_rounds):
-            os.environ["CANN_MATMUL_TILE"] = policy
-            directory = args.output_dir / case["name"] / f"round-{repeat}" / policy
+        for case, repeat, policy in jobs(cases, args.sweep_rounds, policies):
+            os.environ['CANN_MATMUL_TILE'] = policy
+            directory = args.output_dir / case['name'] / f'round-{repeat}' / policy
             print(f"[RUN] {case['name']} round={repeat}/{args.sweep_rounds} tile={policy}", flush=True)
-            if args.generate_only:
-                inputs = args.output_dir / case["name"] / "inputs"
-                if not inputs.exists():
-                    baseline.make_case(case, inputs)
-                result = dict(case=case, status="GENERATED", input_directory=str(inputs.relative_to(args.output_dir)))
-            else:
-                result = measure(args, case, directory)
-                if result["status"] == "PASS":
-                    try:
-                        plan = result.get("matmul_plan")
-                        if plan is None or plan["policy"] != policy:
-                            raise ValueError("missing Matmul plan or actual policy differs from requested tile")
-                        if args.profile != "none":
-                            device_stats(result, args.profile_repeat)
-                    except (KeyError, ValueError) as error:
-                        result.update(status="FAIL", error=str(error))
+            result = measure(args, case, directory)
+            if result['status'] == 'PASS':
+                try:
+                    if result.get('matmul_plan') != registry[case['name']][policy]:
+                        raise ValueError('actual Matmul plan differs from SDK discovery')
+                    if args.profile != 'none':
+                        device_stats(result, args.profile_repeat)
+                except (KeyError, ValueError) as error:
+                    result.update(status='FAIL', error=str(error))
             result.update(round=repeat, requested_policy=policy, directory=str(directory.relative_to(args.output_dir)))
             if directory.is_dir():
-                (directory / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
-            report["results"].append(result)
+                (directory / 'result.json').write_text(json.dumps(result, indent=2, allow_nan=False) + '\n')
+            report['results'].append(result)
             write_reports(report, cases, args.output_dir)
             print(f"[{result['status']}] {case['name']} round={repeat} tile={policy} {result.get('error', '')}", flush=True)
     finally:
         if old_policy is None:
-            os.environ.pop("CANN_MATMUL_TILE", None)
+            os.environ.pop('CANN_MATMUL_TILE', None)
         else:
-            os.environ["CANN_MATMUL_TILE"] = old_policy
-    failed = sum(r["status"] == "FAIL" for r in report["results"])
-    incomplete = sum(s["status"] == "INCOMPLETE" for s in report["sweep_summary"])
+            os.environ['CANN_MATMUL_TILE'] = old_policy
+    failed = sum(r['status'] == 'FAIL' for r in report['results'])
+    incomplete = sum(s['status'] == 'INCOMPLETE' for s in report['sweep_summary'])
     print(f"runs={len(report['results'])} failures={failed}; report={args.output_dir / 'report.md'}")
     return int(failed != 0 or incomplete != 0)

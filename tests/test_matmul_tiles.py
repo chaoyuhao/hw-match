@@ -11,23 +11,23 @@ ROOT = Path(__file__).resolve().parents[1]
 class MatmulTileTests(unittest.TestCase):
     def run_family(self, family):
         source = (ROOT / "kernel.asc").read_text()
-        self.assertTrue("struct MatmulPlan" in source, "shape-aware Matmul planning is not implemented")
+        self.assertTrue((ROOT / "matmul_plan.h").exists(), "shared rule planner is not implemented")
         if not shutil.which("g++"):
             self.skipTest("host C++ compiler unavailable")
-        helpers = source[source.index("struct MatmulPlan"):source.index("__aicore__ inline void ComputeRowMaxima")]
+        helpers = source[source.index("struct MatmulBlock"):source.index("__aicore__ inline void ComputeRowMaxima")]
         with tempfile.TemporaryDirectory(prefix="cann-tile-cpu-") as tmp:
             file = Path(tmp) / "test.cpp"
             file.write_text("#include <algorithm>\n#include <cstdint>\n#include <limits>\n#include <stdexcept>\n"
-                            "#define __aicore__\nnamespace local_baseline {\n" + helpers + "\n}\n" +
+                            "#include \"matmul_plan.h\"\n#define __aicore__\nnamespace local_baseline {\n" + helpers + "\n}\n" +
                             (ROOT / "tests/matmul_tiles_cpu.cpp").read_text())
             binary = Path(tmp) / "test"
             build = subprocess.run(["g++", "-std=c++14", "-O2", "-Wall", "-Wextra", "-Werror",
-                                    str(file), "-o", str(binary)], capture_output=True, text=True, timeout=60)
+                                    "-I", str(ROOT), str(file), "-o", str(binary)], capture_output=True, text=True, timeout=60)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             result = subprocess.run([str(binary), str(family)], capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_auto_reduces_tasks_without_losing_parallelism(self):
+    def test_rule_planner_is_bounded_deterministic_and_checks_resources(self):
         self.run_family(0)
 
     def test_every_output_element_has_one_owner_for_all_tiles_and_tails(self):

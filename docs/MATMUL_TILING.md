@@ -1,134 +1,85 @@
-# 第二轮候选：按 shape 选择 Matmul 分块
+# 规则生成 Matmul 计划：第一阶段
 
-参照版本 `72abad1` 已获用户反馈线上 15/15 通过。其本地 `B=1,M=8192,N=65,K=32,FP16,00` 的设备 Task Duration 中位数为 324.048 μs。此文描述的新候选尚未在真实 CANN/NPU 上编译和测量，不能沿用参照版本的通过记录或承诺提速。
+2026-09-30：替换四种固定候选的选择器。当前候选尚需 CANN 9.1 本地编译、NPU 精度回归及 CANN 9.0 线上评测；主机测试不能证明提速。旧四候选设计与实验记录可在 `a220315` 的此文件中查看。
 
-## 改动与选择规则
+## 规划与执行边界
 
-只调整 Matmul 外层任务尺寸，保留完整 similarity、并行行最大值、按原顺序的 FP32 补偿求和、scratch 布局和两次 AIV 屏障。每次调用仍恰好一个 kernel launch，线上只替换 `kernel.asc`。
+`matmul_plan.h` 是不依赖 CANN 的 C++14 规划器，`kernel.asc` 负责调用 SDK tiler 和设备执行。本轮保留完整 similarity、并行行最大值、串行补偿求和及两次 AIV 屏障。正式入口 ABI 不变，每次成功调用恰好启动一个 MIX kernel。
 
-Host 在 `32×64`、`32×128`、`64×128`、`128×128` 四个候选中依次选择：
+流水为：
 
-1. 任务数为 `B*ceil(M/tileM)*ceil(N/tileN)`；参与核数为任务数与 availableCoreNum 的较小值。
-2. 从 `32×64` 开始。只有候选任务数更少，且参与核数与参照相同时，才替换当前选择。任务数相同时保留较小 tile。
-3. 仅使用本次输入的实际 shape 和 availableCoreNum，无缓存、计时选路或测试点编号。
-
-在 availableCoreNum=24 时：
-
-| B,M,N | 自动 tile | 参照任务数 → 新任务数 | 参与核数 |
-|---|---|---:|---:|
-| 1,8192,65 | 128×128 | 512 → 64 | 24 |
-| 1,1024,65 | 32×128 | 64 → 32 | 24 |
-| 1,33,8192 | 64×128 | 256 → 64 | 24 |
-| 2,65,129 | 32×64 | 18 → 18 | 18 |
-
-Host 的 SetShape、kernel 的任务网格、各 tile 的尾块和启动核数使用同一份选择。A/B 保留原物理行跨度，C 保留 round_up(N,16) 跨度，K 不拆分。SetShape 设定的是一次 Matmul 任务的范围，内部 baseM/baseN/baseK 仍由 CANN tiler 决定，不强制等于外层 tile。
-
-这个选择规则是待测的性能假设。保留核数不保证负载均衡和性能不退化；大 tile 会影响内部 tiling、资源和访存复用，K/dtype/转置尚未作为性能分派条件。GetTiling 失败会明确报错，不会将失败候选伪装成回退成功。
-
-## 先验证正确性
-
-```bash
-git pull --ff-only
-source /usr/local/Ascend/cann-9.1.0/set_env.sh
-CANN_MATMUL_TILE=auto bash scripts/run_local.sh --suite full &&
-CANN_MATMUL_TILE=auto bash scripts/run_local.sh --suite tiling &&
-CANN_MATMUL_TILE=auto bash scripts/run_local.sh --suite reduction
+```text
+ProblemDesc(B/M/N/K/dtype/TA/TB) + HardwareCaps(可用核数/UB)
+  → 规则生成并排序外层任务块
+  → CANN GetTiling 检查内部配置
+  → PreparedMatmul(外层计划 + SDK tiling)
+  → 原有单次启动设备路径
 ```
 
-原有 full 55 项和 reduction 62 项保留；新增 tiling 34 项覆盖 FP16/BF16、四种布局、63/65/127/129 行边界、127/129/257 列边界、全负值、多 batch 及 K=2048。在 24 核下，新套件会实际选中三种较大 tile，不只是用小 shape 测旧路径。
+候选轴包含 16 起的倍增尺寸、输入尺寸向上对齐值、按每 batch 可用核数推导的尺寸。去重后每轴最多 7 个值，交叉组合最多 49 个；容器上限 64。当前外层块每边为 16 的倍数，范围 16..256。256 是当前搜索工程边界，不是硬件上限，也不要求用户手写输入 shape。小维度由真实尾块裁剪。
 
-任何失败先保留 `run.log`、对应 case 的 `runtime.log` 和 `result.json`。CPU 检查验证的是实际整数分块/地址函数、GM 输出覆盖和报告处理，不验证 Cube 数值行为、CANN 编译器或硬件流水线。
+选择评分考虑任务轮数、代表性块计算量（包含 K）、布局相关的 A/B 访存估计和每次 Matmul 调用的固定成本代理。系数是未校准的启发式，不是延迟预测，也没有保证不退化。FP16/BF16 占用相同输入字节数，dtype 影响 SDK 类型合法性，不人为添加两套性能权重。正式调用不做设备试跑或按测试点编号选路。
 
-## 同一新版二进制可测试不同分块
+自动模式最多尝试排序前 4 个候选，再尝试 `32x64` 参照；SDK 全部拒绝则明确失败。本地固定 `MxN` 请求只尝试该配置，不静默换成别的块。`GetTiling` 接受只代表规划通过，仍需验证设备运行。
 
-仅本地 runner 读取环境变量 `CANN_MATMUL_TILE`：
+UB 从平台接口查询；Matmul 预算为 `min(128 KiB, UB - 64 KiB)`。已有显式归约缓冲占 37152 字节，64 KiB 是含余量的保守保留值，并非精确通信占用模型。内部 baseM/baseN/baseK 由 CANN 决定，本地报告实际返回值。后续双缓冲、融合路径须更新资源核算，不能直接沿用这一预算。
 
-| 值 | 行为 |
-|---|---|
-| auto（默认） | 正式 run_kernel 默认的 shape 选择逻辑 |
-| 32x64 | 固定原来的任务尺寸 |
-| 32x128 | 固定较宽任务 |
-| 64x128 | 固定中等任务 |
-| 128x128 | 固定最大候选 |
-
-固定模式跳过“核数不减少”的筛选，可能降低并行度，用于测量取舍。它与 auto 复用同一个 kernel 和 RunKernel 实现；环境变量解析、日志和 JSON 写入都在本地 runner 中，提交的 kernel 不读取环境变量。`32x64` 保留参照几何布局，但不是旧提交的相同二进制；可与旧报告交叉核对额外参数/调度计算的影响。
-
-先测默认候选的完整压力集：
-
-```bash
-CANN_MATMUL_TILE=auto bash scripts/run_perf.sh --suite stress
-```
-
-固定策略也应先验证 tiling 套件，例如 `CANN_MATMUL_TILE=64x128 bash scripts/run_local.sh --suite tiling`。为了减少反复编译，可以复用刚生成的 binary 做分块对比。下面第一行替换为该 run 的实际目录；所有策略依次运行，不并行争用 NPU：
-
-```bash
-tile_run=/实际路径/build-perf/run-时间戳
-tile_compare=$(mktemp -d "$PWD/build-perf/tile-compare-XXXXXX")
-for tile in 32x64 32x128 64x128 128x128 auto; do
-    CANN_MATMUL_TILE="$tile" python3 scripts/perf_local.py \
-      --binary "$tile_run/build/baseline_runner" \
-      --output-dir "$tile_compare/$tile" --suite stress \
-      --case sweep_m8192_fp16_00 --profile timeline || break
-done
-```
-
-也可以单独使用 `CANN_MATMUL_TILE=32x64 bash scripts/run_perf.sh --suite stress` 创建新构建，并用现有 `--compare /旧run/cases/report.json` 比较 host median。固定策略的大范围使用前也应通过对应的正确性套件。
-
-每个 case 的 `matmul_plan.json` 记录实际 policy、tile、任务数和参与核数，合并进报告。Markdown 显示 `Tile; tasks/blocks`。Host 与独立 profiling 的 plan 不一致会判为失败。旧 binary 没有该文件时保留未知，不从环境变量推测已应用策略。
-
-回传 `report.json` 和 `report.md` 即可先分析；最终验收和得分仍以线上评测为准。
-
-## 一次构建采集分块矩阵
-
-`--tile-sweep` 复用同一次构建，针对相同输入依次测试四种固定 tile 和当前 `auto` 策略。它收集选路所需的数据，不修改 kernel 或自动生成决策树。
+## 日常迭代
 
 在 NPU 机器运行：
 
 ```bash
 git pull --ff-only
 source /usr/local/Ascend/cann-9.1.0/set_env.sh
-bash scripts/run_perf.sh --suite stress --tile-sweep
+CANN_MATMUL_TILE=auto bash scripts/run_local.sh --suite full &&
+CANN_MATMUL_TILE=auto bash scripts/run_local.sh --suite generated --case-count 64 --case-seed 20260930 &&
+CANN_MATMUL_TILE=auto bash scripts/run_local.sh --suite reduction
 ```
 
-默认 48 个输入 × 5 种策略 × 2 轮，共 480 次 runner 运行。每次仍有 2 次正确性检查、3 次 warmup 和 30 次 Host 计时；各策略使用相同 shape、数据类型、布局、输入分布和随机种子。候选串行执行，随用例和轮次旋转顺序，减轻顺序偏差；轮换并不能排除温度、频率或其他任务干扰。不要同时运行其他性能测试。
+`generated` 默认组合 8 类规则与两 dtype × 四布局，覆盖小输入、对齐、尾块、长条、宽矩阵、核数边界、长 K 和 batch 边界。K 为 8 的倍数；每例 `B*M*N*K <= 32*1024*1024`，保守临时内存估计不超过 128 MiB，拒绝采样最多 128 次。数量和 seed 可调整；`--case-cores` 只是生成边界的提示，不改变执行时真实核数。这些限制控制本地回归成本，不宣称还原线上隐藏数据分布。
 
-脚本覆盖继承的 `CANN_MATMUL_TILE`，以每个 runner 写出的 `matmul_plan.json` 验证实际策略。缺少计划、请求与实际策略不符、不同轮次的计划变化、精度或 profiling 失败时，不为该用例宣布优胜者，并以非零退出。报告逐次保存，失败的日志仍保留。每次运行使用新目录，不混入旧样本。
+用例保存生成规则版本、seed、索引、族别和完整输入身份的 hash。报告比较按 B/M/N/K/dtype/TA/TB/pattern/seed 匹配，名称只用于显示和目录。已有 full/reduction/tiling 等固定回归锚点继续保留。
 
-默认比较 **Host 调用耗时**，包含 tiling 和分配/释放，适合先检查覆盖和明显趋势。设备比较需要显式采集 profiling，可以先针对一个代表性输入：
+本地可指定任意合法几何，如 `CANN_MATMUL_TILE=80x144`；SDK 不接受则失败。环境变量解析和全部调试输出都在 runner，线上代码不读取环境变量。
+
+本轮线上需要复制 **`kernel.asc` 和新增的 `matmul_plan.h`**，置于同目录；其余原始文件不改。不需要提交包。本地 runner、脚本和文档不复制。
+
+## 可选的动态候选采样
+
+需要解释瓶颈或退化时再使用；不要求每轮先跑全量矩阵：
 
 ```bash
-bash scripts/run_perf.sh --suite stress --tile-sweep \
-  --case sweep_m8192_fp16_00 --profile timeline
+bash scripts/run_perf.sh --suite quick --tile-sweep --sweep-candidates 6
+# 同样支持规则生成用例，以及可选 --profile timeline
+bash scripts/run_perf.sh --suite generated --case-count 16 --tile-sweep --sweep-candidates 4
 ```
 
-省略 `--case` 会对全部输入采集，耗时更长。`--sweep-rounds 1` 可用于初步排查，重复轮次更多才有跨轮波动信息。设备排名只接受预期的单个 `MatmulMaxSum` / `MIX_AIC` 任务组及正确记录数；若 CANN 导出形式不同会报错，保留原始 CSV 后再适配，不能擅自相加。设备统计来自独立 profiling 运行，含首次调用；不会用 Host 耗时补缺，也不与 Host 耗时相减。
+runner 的 `--list-plans CASE_DIR LOGICAL_DEVICE OUTPUT_JSON` 只做元数据规划和 SDK 检查，不启动计算 kernel。它返回按 C++ 评分排序的候选及拒绝状态。Python 取前若干个接受的候选，再补已接受的 `32x64` 和 `auto`；默认每例最多 8 个策略、2 轮，实际数量随输入与 SDK 变化。所有运行串行且轮换顺序，使用相同输入数据。
 
-报告位于新建 run 目录的 `cases/` 下：
+每轮实际计划必须与发现结果一致，包括问题描述、硬件能力、外层块、任务网格、UB 预算和内部基本块；profile 与普通运行也必须一致。精度、计划或 profile 失败时，该输入不宣布赢家。旧无 schema 的四候选报告仍可读取，但新 sweep 要求支持 schema 2 的 runner。
+
+`plan_id` 标识算法族/规划版本/外层几何，不独自标识一次完整执行。完整关联使用问题、硬件、全部实际计划和源码/二进制 hash；变更配置语义应增加 planner/schema 版本。报告同时保存 `kernel.asc`、`matmul_plan.h` 快照与工具源码 hash。
 
 | 文件 | 内容 |
 | --- | --- |
-| `report.md` | 每个输入的五策略耗时、观测最快策略、`auto/最快` 比值、接近最快的候选和错误信息 |
-| `report.json` | 每一轮的原始统计、精度、实际分块、profiling 汇总、版本信息及聚合结果 |
-| `sweep.csv` | 每个输入 × 策略一行，便于画图或归纳规则；同时保留 Host/设备两种口径 |
-| `<case>/round-<轮次>/<策略>/` | 输入、输出、原始 Host 样本、runner 日志和可选的 profiling 文件 |
+| `report.md` | 每例候选数、观测最快、auto/最快、near_best、错误 |
+| `report.json` | 候选发现原文、逐轮精度/实际计划/统计、源码和环境信息 |
+| `sweep.csv` | 每个输入与策略一行，两种计时口径及几何特征 |
+| `<case>/discovery/` | 无 launch 的规划输入、候选 JSON、SDK 日志 |
+| `<case>/round-N/MxN/` | 正确性输出、Host 原始样本和可选 profile |
 
-聚合耗时是各轮中位数的中位数，同时保存各轮中位数和 p95。`near_best` 包含比观测最快慢不超过 3%，或跨轮中位数范围与其重叠的候选；这是启发式提示，不是统计置信区间。只差一点的配置不应据此立即形成新的选择分支。固定 `32x64` 是同一新版二进制的固定几何配置，不代表旧提交的完整实现。
+Host 耗时包含每次规划、分配、同步和释放；设备 Task Duration 来自独立 profiling，含首次调用。两者不能混用或相减。聚合使用轮中位数的中位数；near_best 的 3%/波动范围规则仅用于候选提示，不是统计显著性。几何利用率不是硬件利用率。
 
-CSV 的任务数、轮数、活跃核比例、所有轮次的任务槽占用比例、外层 tile 有效面积比例、FLOPs 和 similarity 大小均由实际 plan 与输入元数据推导。任务槽占用比例为 `tasks/(waves*blocks)`，不是仅最后一轮的占用比例。它们是几何/工作量特征，不是测得的硬件利用率，外层 tile 也不等于 Matmul 内部基本块。
-
-无 NPU 的开发机可先验证输入与实验规模：
+无 NPU 可以运行：
 
 ```bash
-bash scripts/run_perf.sh --suite stress --tile-sweep --generate-only
+bash scripts/run_perf.sh --suite generated --case-count 64 --tile-sweep --generate-only
 ```
 
-此模式每个输入仅生成一份数据，记录全部计划运行项，状态为 GENERATED，不产生耗时或排名。本地脚本只为后续分析收集证据；没有真实设备结果前，不据此更新 Host 选择器或声称提速。
+此模式每例只生成一份输入，标记 `discovery_pending=true`、`expected_runs=null`，不虚构 SDK 接受列表、测量或排名。
 
-## 开发机检查记录
+## 后续扩展契约
 
-- `python3 -m unittest discover -s tests -v`：41 项通过，包含实际 C++ 分块/地址函数的 CPU 检查和 host/profile 分块不一致的失败检查。
-- tiling 34 项数据生成成功，全部标记为 GENERATED，报告为 `build-baseline/run-20260929T145556Z-pzA5jA/cases/report.json`。
-- 独立代码审查未发现阻塞问题。源码检查确认两个归约 helper 与 `72abad1` 相同，官方入口签名/实现相同，一次 launch、两次屏障，kernel 内无调试 I/O 或环境变量读取。
-- 开发机没有 CANN 编译器或 NPU；尚无本候选的设备编译、正确性和性能结果。
+新增融合/流水算法时，先定义计划中的 owner、N 分片、结果缓冲和同步参与者，再加入候选族与资源检查。不要仅增加 tile 名称。第二阶段首先实现逐块 Matmul → 行最大值；第三阶段再开展双缓冲、固定结构求和及小规模路径。详细依赖见 [架构审计](ARCHITECTURE_AUDIT.md)。
 
-接口依据：[CANN 9.1 Matmul shape 概念与设置](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/programug/Ascendcopdevg/docs/en/guide/operator_practice/simd_operator_impl/matrix_advanced_api/operator_implementation.md)。接口与新分块的实际兼容性仍需在目标 CANN 9.0 和本地 9.1 编译验证。
+接口实现参考用户克隆的官方 learning hub 中 `02.06/add_custom_template.asc` 的 `GetCoreMemSize`，以及 `03.05/matmul_abs.asc` 的 TCubeTiling 基本块访问；以实际安装 SDK 编译结果为准。

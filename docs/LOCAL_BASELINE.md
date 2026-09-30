@@ -8,7 +8,7 @@
 
 ## 线上修改范围
 
-用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选实现自包含于 `kernel.asc`，在本地重新验证后，将整个文件复制到线上对应文件即可，不需要提交包或新增文件。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
+用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选由 `kernel.asc` 和新增的 `matmul_plan.h` 组成；本地回归后，将两个文件复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
 
 原模板还明确要求：`kernel.asc` 被外部直接 include，不添加 `main()`、`#pragma once` 或 include guard，不重复定义已有的 TensorInfo/TensorGroupInfo。注释里的 `__cube__` 是示例，没有写明禁止 MIX；workspace、host 检查及调试 API 的许可不能从这段注释推断。
 
@@ -68,7 +68,7 @@ python3 scripts/local_baseline.py \
 
 `kernel.asc` 保留原始 `run_kernel` 签名，由原 `main.asc` 和本地 runner 共用。实际计算都在 NPU 执行，host 只校验元数据、计算 tiling、分配空间和调度：
 
-1. 一个 `__mix__(1,1)` kernel 内，由 AIV 调用 Matmul 高阶 API，通过通信框架在 AIC 执行矩阵乘。FP16/BF16 输入、FP32 输出；每个任务负责一个 batch 内的输出块，外层分块由 `32×64` 到 `128×128` 按 shape 选择，沿完整 K 计算。四种转置存储布局直接通过地址偏移和 API 的 transpose 参数解释。
+1. 一个 `__mix__(1,1)` kernel 内，由 AIV 调用 Matmul 高阶 API，通过通信框架在 AIC 执行矩阵乘。FP16/BF16 输入、FP32 输出；每个任务负责一个 batch 内的输出块，外层分块由规则生成并按实际元数据选择，详见 [规划接口](MATMUL_TILING.md)，沿完整 K 计算。四种转置存储布局直接通过地址偏移和 API 的 transpose 参数解释。
 2. 每个 AIV 等待自己负责的 Matmul 完成后，全体 AIV 执行 `SyncAll<true>()`，使归约能够读取其他核产生的中间结果。启动块数不超过入口传入的可用 Cube 核数，且设置 `__schedmode__(1)`，满足同步的调度要求。所有 AIV 都参加同步，包括不负责最终输出的核。
 3. 同一次启动内执行 Vector 归约：每个任务处理 32 行、每次读最多 256 列；WholeReduceMax 的 repeat 同时处理多行，再用向量 Max 合并列段。所有行最大值写入独占且对齐的 GM 区域后，再次进行 AIV 核间同步。
 4. 最终输出 owner 每次读取最多 1024 个行最大值，按原固定行顺序进行 FP32 补偿求和。没有浮点原子加，也没有第二次 kernel 启动。

@@ -23,27 +23,38 @@ class TileSweepTests(unittest.TestCase):
         runner = root / "fixture runner $(literal)"
         runner.write_text(f"#!{sys.executable}\n" + '''
 import json, os, pathlib, sys
-p = pathlib.Path(sys.argv[1])
+discover = sys.argv[1] == '--list-plans'
+p = pathlib.Path(sys.argv[2] if discover else sys.argv[1])
 case = json.loads((p / 'case.json').read_text())
-policy = os.environ['CANN_MATMUL_TILE']
 tiles = {'32x64': (32,64), '32x128': (32,128), '64x128': (64,128),
-         '128x128': (128,128), 'auto': (32,64)}
-tm, tn = tiles[policy]
-tasks = case['b'] * ((case['m']+tm-1)//tm) * ((case['n']+tn-1)//tn)
-plan = dict(policy=policy, tile_m=tm, tile_n=tn, tasks=tasks,
-            blocks=min(24,tasks), available_cores=24)
+         '80x144': (80,144), 'auto': (32,64)}
+def make_plan(policy):
+    tm, tn = tiles[policy]
+    tasks = case['b'] * ((case['m']+tm-1)//tm) * ((case['n']+tn-1)//tn)
+    return dict(schema_version=2, planner_version=1, plan_id=f'gm-v1-{tm}x{tn}',
+                policy=policy, tile_m=tm, tile_n=tn, tasks=tasks, blocks=min(24,tasks), available_cores=24,
+                ub_bytes=192*1024, ub_budget=128*1024, inner_tile=dict(m=16,n=16,k=16), heuristic_score=float(tm*tn),
+                problem={k:case[k] for k in ('b','m','n','k','dtype','ta','tb')})
+if discover:
+    if os.environ.get('BAD_DISCOVERY'): sys.exit(3)
+    data = dict(schema_version=2, auto=make_plan('auto'), candidates=[
+        dict(policy=key, accepted=True, plan=make_plan(key)) for key in tiles if key != 'auto'])
+    pathlib.Path(sys.argv[4]).write_text(json.dumps(data))
+    sys.exit(0)
+policy = os.environ['CANN_MATMUL_TILE']
+plan = make_plan(policy)
 if os.environ.get('BAD_PLAN') and policy == '32x64':
     plan['policy'] = 'auto'
 if not os.environ.get('MISSING_PLAN'):
     (p / 'matmul_plan.json').write_text(json.dumps(plan))
 for i in range(int(sys.argv[3])):
     data = (p / 'golden_y.bin').read_bytes()
-    if os.environ.get('BAD_OUTPUT') and policy == '128x128':
+    if os.environ.get('BAD_OUTPUT') and policy == '80x144':
         data = bytes(len(data))
     (p / f'y-{i}.bin').write_bytes(data)
 if len(sys.argv) == 7:
     w, n = map(int, sys.argv[5:])
-    t = {'32x64':40, '32x128':20, '64x128':30, '128x128':50, 'auto':40}[policy]
+    t = {'32x64':40, '32x128':20, '64x128':30, '80x144':50, 'auto':40}[policy]
     (p / 'host_timings.csv').write_text('iteration,warmup,host_call_us\\n' +
         ''.join(f'{i},{int(i<w)},{1000 if i<w else t}\\n' for i in range(w+n)))
 ''')
@@ -56,7 +67,7 @@ out = pathlib.Path(next(a.split('=',1)[1] for a in args if a.startswith('--outpu
 out.mkdir(parents=True)
 app = next(i for i,a in enumerate(args) if not a.startswith('--'))
 subprocess.run(' '.join(args[app:]), shell=True, check=True)
-t = {'32x64':10, '32x128':20, '64x128':5, '128x128':30, 'auto':10}[os.environ['CANN_MATMUL_TILE']]
+t = {'32x64':10, '32x128':20, '64x128':5, '80x144':30, 'auto':10}[os.environ['CANN_MATMUL_TILE']]
 name = 'unrelated_kernel' if os.environ.get('BAD_PROFILE') else 'MatmulMaxSum_fixture'
 count = 1 if os.environ.get('BAD_COUNT') else 2
 (out / 'op_summary.csv').write_text('Op Name,Task Type,Task Duration(us)\\n' +
@@ -84,7 +95,7 @@ count = 1 if os.environ.get('BAD_COUNT') else 2
             self.assertEqual(len(report['results']), 10)
             first = [x['requested_policy'] for x in report['results'] if x['round'] == 1]
             second = [x['requested_policy'] for x in report['results'] if x['round'] == 2]
-            self.assertEqual(set(first), {'32x64','32x128','64x128','128x128','auto'})
+            self.assertEqual(set(first), {'32x64','32x128','64x128','80x144','auto'})
             self.assertNotEqual(first, second)
             for result in report['results']:
                 self.assertEqual(result['requested_policy'], result['matmul_plan']['policy'])
@@ -133,13 +144,33 @@ count = 1 if os.environ.get('BAD_COUNT') else 2
             done = subprocess.run(self.command(out, '--generate-only'), capture_output=True, text=True, timeout=60)
             self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
             report = json.loads((out / 'report.json').read_text())
-            self.assertEqual(len(report['results']), 10)
+            self.assertEqual(len(report['results']), 1)
+            self.assertTrue(report['sweep']['discovery_pending'])
+            self.assertIsNone(report['sweep']['expected_runs'])
             self.assertTrue(all(r['status']=='GENERATED' for r in report['results']))
             self.assertIsNone(report['sweep_summary'][0]['host'])
             self.assertEqual(len(list(out.rglob('golden_y.bin'))), 1)
             # A second run must not combine old and new measurements.
             again = subprocess.run(self.command(out, '--generate-only'), capture_output=True, text=True, timeout=60)
             self.assertNotEqual(again.returncode, 0)
+
+    def test_discovery_failure_and_candidate_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner, env = self.fixture(root)
+            for fail in (False, True):
+                out = root / str(fail)
+                done = subprocess.run(self.command(out, '--binary', str(runner), '--sweep-candidates','1'),
+                                      env=dict(env, **({'BAD_DISCOVERY':'1'} if fail else {})),
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, int(fail), done.stdout + done.stderr)
+                report = json.loads((out / 'report.json').read_text())
+                self.assertEqual(len(report['results']), 1 if fail else 4)
+                if fail:
+                    self.assertEqual(report['sweep_summary'][0]['status'],'INCOMPLETE')
+                    self.assertIsNone(report['sweep_summary'][0]['host'])
+                else:
+                    self.assertEqual(report['sweep']['policies_by_case']['layout_fp16_00'], ['32x64','auto'])
 
     def test_default_host_sweep_never_invents_device_measurements(self):
         with tempfile.TemporaryDirectory() as tmp:

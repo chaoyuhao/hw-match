@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Generate and verify local NPU cases. Never an official scoring tool."""
+import case_rules
 import argparse
 import hashlib
 import json
@@ -176,6 +177,9 @@ def read_matmul_plan(directory, case):
     if not path.exists():
         return None  # Older runners have no plan metadata; never invent one.
     plan = json.loads(path.read_text())
+    if isinstance(plan, dict) and "schema_version" in plan:
+        from plan_metadata import validate
+        return validate(plan, case)
     tiles = {"32x64": (32, 64), "32x128": (32, 128), "64x128": (64, 128), "128x128": (128, 128)}
     if not isinstance(plan, dict) or plan.get("policy") not in ("auto", *tiles):
         raise ValueError("invalid Matmul policy metadata")
@@ -239,19 +243,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--suite", choices=("smoke", "full", "reduction", "tiling"), default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "full", "reduction", "tiling", "generated"), default="smoke")
     parser.add_argument("--case", help="run exactly one named case from the selected suite")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--repeat", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--no-dump-similarity", action="store_true")
     parser.add_argument("--generate-only", action="store_true")
+    case_rules.add_arguments(parser)
     args = parser.parse_args()
     if args.device < 0 or args.repeat < 1 or args.timeout < 1:
         parser.error("device must be nonnegative; repeat and timeout must be positive")
     if not args.generate_only and (args.binary is None or not args.binary.is_file()):
         parser.error("provide an existing --binary or use --generate-only")
-    cases = cases_for_suite(args.suite)
+    cases = case_rules.from_arguments(args, parser) if args.suite == "generated" else cases_for_suite(args.suite)
     if args.case:
         cases = [case for case in cases if case["name"] == args.case]
         if not cases:
@@ -261,6 +266,9 @@ def main():
                   suite=args.suite, results=[])
     kernel = Path(__file__).resolve().parents[1] / "kernel.asc"
     report["kernel_sha256"] = hashlib.sha256(kernel.read_bytes()).hexdigest()
+    report["source_sha256"] = {str(path.relative_to(kernel.parent)): hashlib.sha256(path.read_bytes()).hexdigest()
+                               for path in (kernel, kernel.with_name("matmul_plan.h"), Path(__file__),
+                                            Path(case_rules.__file__), kernel.parent / "scripts/plan_metadata.py")}
     print("LOCAL_BASELINE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     for case in cases:
         directory = args.output_dir / case["name"]
