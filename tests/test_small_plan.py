@@ -30,17 +30,29 @@ int main() {
   ProblemDesc{1,3,5,24,1,false,false}})
   assert(MakeSmallPlan(p,h).variant==SmallVariant::None);
  assert(MakeSmallPlan({1,1,1,8,1,false,false},{24,32768}).variant==SmallVariant::None);
- for (uint64_t b : {1,2,8,9,32}) for(uint32_t m : {1,2,3}) for(uint32_t n : {1,2,9}) {
-  ProblemDesc p{b,m,n,8,1,false,true}; auto s=MakeSmallPlan(p,h);
-  assert(UseSmallAutomatically(p,s)==(std::min<uint64_t>(b,8)*m*n<=16));
-  assert(SelectSmall(p,s,{},ExecutionFamily::Auto)==UseSmallAutomatically(p,s));
-  assert(!SelectSmall(p,s,{},ExecutionFamily::Gm));
-  assert(!SelectSmall(p,s,{32,64},ExecutionFamily::Auto));
-  assert(SelectSmall(p,s,{},ExecutionFamily::Small));
- }
- for(uint32_t k:{8,16,24,32,40,64}) {
-  ProblemDesc p{1,1,5,k,1,false,false};auto s=MakeSmallPlan(p,h);
-  assert(UseSmallAutomatically(p,s)==(k<=32));
+ // Coverage and fallback at both new per-owner budget boundaries.
+ struct Scenario {uint64_t b;uint32_t m,n,k;bool ta,tb,automatic;};
+ for (const auto& t : {
+   Scenario{1,1,17,8,false,true,true},
+   Scenario{1,2,64,8,false,true,true},
+   Scenario{1,3,43,8,false,true,false},
+   Scenario{8,1,16,8,false,true,true},
+   Scenario{8,1,17,8,false,true,false},
+   Scenario{32,1,16,8,false,true,true},
+   Scenario{1,1,5,64,false,false,true},
+   Scenario{4,1,5,64,true,false,true},
+   Scenario{5,1,5,64,false,false,false},
+   Scenario{8,1,5,32,true,false,true},
+   Scenario{8,1,5,40,false,false,false}}) {
+  for(uint32_t dtype : {1U,2U}) {
+   ProblemDesc p{t.b,t.m,t.n,t.k,dtype,t.ta,t.tb};auto s=MakeSmallPlan(p,h);
+   assert(s.variant!=SmallVariant::None);
+   assert(UseSmallAutomatically(p,s)==t.automatic);
+   assert(SelectSmall(p,s,{},ExecutionFamily::Auto)==t.automatic);
+   assert(!SelectSmall(p,s,{},ExecutionFamily::Gm));
+   assert(!SelectSmall(p,s,{32,64},ExecutionFamily::Auto));
+   assert(SelectSmall(p,s,{},ExecutionFamily::Small));
+  }
  }
  auto waves=MakeSmallPlan({32,1,1,8,1,false,false},{1,192*1024});
  assert(!UseSmallAutomatically({32,1,1,8,1,false,false},waves));

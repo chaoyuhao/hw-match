@@ -37,12 +37,16 @@ inline SmallPlan MakeSmallPlan(const ProblemDesc& p, const HardwareCaps& caps)
     s.blocks=std::min(s.tasks,caps.cores);
     return s;
 }
+// R9 online experiment: per-owner work budgets, independent of UB/layout limits.
+constexpr uint32_t SMALL_AUTO_DOT_LIMIT = 128;  // complete dot products per group
+constexpr uint32_t SMALL_AUTO_ROWS_LIMIT = 256; // N-vector updates per group
 inline bool UseSmallAutomatically(const ProblemDesc& p, const SmallPlan& s)
 {
     if(s.variant==SmallVariant::None || s.tasks>s.blocks) return false;
     const uint64_t owned=std::min<uint64_t>(p.batches,8);
-    // Experimental, deliberately narrow online candidate; not measured thresholds.
-    return s.variant==SmallVariant::Dot ? owned*p.m*p.n<=16 : owned*p.m*p.k<=32;
+    // Experimental coverage limits; no measured performance break-even claimed.
+    return s.variant==SmallVariant::Dot ? owned*p.m*p.n<=SMALL_AUTO_DOT_LIMIT
+                                       : owned*p.m*p.k<=SMALL_AUTO_ROWS_LIMIT;
 }
 inline bool SelectSmall(const ProblemDesc& p, const SmallPlan& s, TileRequest tile, ExecutionFamily family)
 {
