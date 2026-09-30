@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Generate and verify local NPU cases. Never an official scoring tool."""
 import case_rules
+import plan_metadata
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -72,6 +74,22 @@ def cases_for_suite(suite):
         cases.append(dict(name=f"{name}_{dtype}_{int(ta)}{int(tb)}", b=b, m=m, n=n, k=k,
                           dtype=dtype, ta=ta, tb=tb, pattern=pattern, seed=20260929))
 
+    if suite == "small":
+        # Generate axis-boundary probes, then cross dtype/layout. No official case IDs.
+        shapes = {(1, 2, 8, 8), (1, 3, 5, 8)}
+        base = [1, 1, 1, 8]
+        for axis, values in enumerate(((1, 7, 8, 9, 31, 32, 33), (1, 2, 3, 16, 17),
+                                       (1, 15, 16, 17, 63, 64, 65), (8, 24, 32, 40, 248, 256, 264))):
+            for value in values:
+                shape = base.copy(); shape[axis] = value; shapes.add(tuple(shape))
+        patterns = ("random", "negative", "zero", "cancellation", "near_tie")
+        for dtype in ("fp16", "bf16"):
+            for ta in (False, True):
+                for tb in (False, True):
+                    for index, shape in enumerate(sorted(shapes)):
+                        add("small_" + "_".join(map(str, shape)), shape, dtype, ta, tb, patterns[index % len(patterns)])
+        return cases
+
     if suite == "tiling":
         for dtype in ("fp16", "bf16"):
             for ta in (False, True):
@@ -137,6 +155,10 @@ def make_case(case, directory):
     elif case["pattern"] == "cancellation":
         a[:, :, 1::2] = a[:, :, ::2]
         x[:, 1::2, :] = -x[:, ::2, :]
+    elif case["pattern"] == "near_tie":
+        # Adjacent columns differ by one BF16-representable step before dot products.
+        x[:] = x[:, :, :1]
+        x[:, :, 1::2] += np.float32(1 / 128)
     elif case["pattern"] == "row_cancellation":
         # Exactly representable in both input formats. Each row's entire dot
         # product is one value, so this isolates cancellation in the M sum.
@@ -198,6 +220,23 @@ def read_matmul_plan(directory, case):
     return plan
 
 
+def read_execution_plan(directory, case, requested_family=None):
+    path = directory / "execution_plan.json"
+    if requested_family not in (None, "auto", "gm", "small"):
+        raise ValueError("invalid requested execution family")
+    if not path.is_file():
+        if requested_family in ("gm", "small"):
+            raise ValueError("forced family requires execution metadata; rebuild the runner")
+        return None  # Old runner/report compatibility.
+    execution = plan_metadata.validate_execution(json.loads(path.read_text()), case)
+    if requested_family is not None and execution['requested_family'] != requested_family:
+        raise ValueError("execution metadata differs from requested family")
+    gm = read_matmul_plan(directory, case)
+    if (execution['family'] == 'small' and gm is not None) or (execution['family'] == 'gm' and gm != execution['matmul']):
+        raise ValueError('execution and legacy Matmul metadata disagree')
+    return execution
+
+
 def run_case(binary, case, directory, device, repeat, timeout, dump_similarity, benchmark=None):
     result = dict(case=case, status="FAIL", online_evaluation="NOT_RUN")
     start = time.monotonic()
@@ -214,6 +253,9 @@ def run_case(binary, case, directory, device, repeat, timeout, dump_similarity, 
         plan = read_matmul_plan(directory, case)
         if plan is not None:
             result["matmul_plan"] = plan
+        execution = read_execution_plan(directory, case, os.environ.get("CANN_EXECUTION_FAMILY", "auto"))
+        if execution is not None:
+            result["execution_plan"] = execution
         outputs = []
         result["precision"] = []
         for index in range(repeat):
@@ -222,7 +264,9 @@ def run_case(binary, case, directory, device, repeat, timeout, dump_similarity, 
             if outputs and not np.array_equal(actual.view("<u4"), outputs[0].view("<u4")):
                 raise ValueError(f"repeat {index} differs bitwise from repeat 0")
             outputs.append(actual)
-        if dump_similarity:
+        if dump_similarity and execution is not None and not execution['similarity_available']:
+            result["similarity_validation"] = "unavailable_in_small_family"
+        elif dump_similarity:
             pitch = ((case["n"] + 15) // 16) * 16
             actual = read_f32(directory / "similarity.bin", case["b"] * case["m"] * pitch)
             actual = actual.reshape(case["b"], case["m"], pitch)[..., :case["n"]]
@@ -243,7 +287,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--suite", choices=("smoke", "full", "reduction", "tiling", "generated"), default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "full", "reduction", "tiling", "generated", "small"), default="smoke")
     parser.add_argument("--case", help="run exactly one named case from the selected suite")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--repeat", type=int, default=2)
@@ -267,7 +311,8 @@ def main():
     kernel = Path(__file__).resolve().parents[1] / "kernel.asc"
     report["kernel_sha256"] = hashlib.sha256(kernel.read_bytes()).hexdigest()
     report["source_sha256"] = {str(path.relative_to(kernel.parent)): hashlib.sha256(path.read_bytes()).hexdigest()
-                               for path in (kernel, kernel.with_name("matmul_plan.h"), Path(__file__),
+                               for path in (kernel, kernel.with_name("matmul_plan.h"), kernel.with_name("small_plan.h"),
+                                            kernel.with_name("small_vector.h"), Path(__file__),
                                             Path(case_rules.__file__), kernel.parent / "scripts/plan_metadata.py")}
     print("LOCAL_BASELINE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     for case in cases:

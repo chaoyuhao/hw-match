@@ -73,3 +73,44 @@ def validate_discovery(data, case):
     if actual not in accepted or {**accepted[actual], 'policy':'auto'} != auto:
         raise ValueError('automatic plan missing or inconsistent in discovered candidates')
     return accepted
+
+
+def validate_execution(plan, case):
+    """Actual family contract; no timing thresholds or second auto selector."""
+    if not isinstance(plan, dict) or plan.get('schema_version') != 3:
+        raise ValueError('unsupported execution schema')
+    if plan.get('problem') != problem(case):
+        raise ValueError('execution input metadata mismatch')
+    family, requested = plan.get('family'), plan.get('requested_family')
+    if family not in ('gm', 'small') or requested not in ('auto', 'gm', 'small'):
+        raise ValueError('invalid execution family')
+    if requested != 'auto' and requested != family:
+        raise ValueError('requested and actual family differ')
+    if type(plan.get('similarity_available')) is not bool or plan['similarity_available'] != (family == 'gm'):
+        raise ValueError('similarity availability does not match family')
+    for key in ('tasks', 'blocks', 'available_cores', 'ub_bytes'):
+        if type(plan.get(key)) is not int or plan[key] < 1:
+            raise ValueError('invalid execution counts/resources')
+    if plan['available_cores'] > 65535 or plan['blocks'] != min(plan['tasks'], plan['available_cores']):
+        raise ValueError('invalid execution blocks')
+    if family == 'gm':
+        gm = validate(plan.get('matmul'), case)
+        if plan.get('variant') != 'mix' or any(plan[k] != gm[k] for k in ('tasks','blocks','available_cores','ub_bytes')):
+            raise ValueError('GM execution disagrees with Matmul plan')
+    else:
+        b, m, n, k = (case[key] for key in ('b','m','n','k'))
+        dot = (not case['ta'] or m == 1) and (case['tb'] or n == 1)
+        if not (1 <= b <= 32 and 1 <= m <= 16 and 1 <= n <= 64 and 8 <= k <= 256 and k % 8 == 0
+                and m*n*k <= 32768 and case['dtype'] in ('fp16','bf16')):
+            raise ValueError('small geometry outside legal bounds')
+        if plan.get('variant') != ('dot' if dot else 'rows') or (not dot and (case['tb'] or m*k > 64)):
+            raise ValueError('small variant/layout mismatch')
+        align = lambda x: (x + 15) // 16 * 16
+        a_elements = m*align(k) if dot or not case['ta'] else k*align(m)
+        b_elements = n*align(k) if dot else k*align(n)
+        used = 6*(a_elements+b_elements)+1344
+        if type(plan.get('ub_used')) is not int or plan['ub_used'] != used or used > min(65536,plan['ub_bytes']-32768):
+            raise ValueError('small resource accounting mismatch')
+        if plan['tasks'] != (b+7)//8 or 'matmul' in plan:
+            raise ValueError('small tasks or unexpected Matmul metadata')
+    return plan

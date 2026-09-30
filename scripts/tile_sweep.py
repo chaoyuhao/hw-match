@@ -187,7 +187,8 @@ def run(args, cases, report, measure):
     report['sweep'] = dict(policies_by_case=policies, rounds=args.sweep_rounds, expected_runs=None,
                            discovery_pending=args.generate_only, discovery={},
                            ranking_metric='device' if args.profile != 'none' else 'host',
-                           overrides_inherited_CANN_MATMUL_TILE=True)
+                           overrides_inherited_CANN_MATMUL_TILE=True, execution_family="gm",
+                           overrides_inherited_CANN_EXECUTION_FAMILY=True)
     for case in cases:
         name = case['name']
         policies[name] = []
@@ -208,7 +209,9 @@ def run(args, cases, report, measure):
         report['sweep']['expected_runs'] = sum(map(len, policies.values())) * args.sweep_rounds
     write_reports(report, cases, args.output_dir)
     old_policy = os.environ.get('CANN_MATMUL_TILE')
+    old_family = os.environ.get('CANN_EXECUTION_FAMILY')
     try:
+        os.environ['CANN_EXECUTION_FAMILY'] = 'gm'
         for case, repeat, policy in jobs(cases, args.sweep_rounds, policies):
             os.environ['CANN_MATMUL_TILE'] = policy
             directory = args.output_dir / case['name'] / f'round-{repeat}' / policy
@@ -229,6 +232,10 @@ def run(args, cases, report, measure):
             write_reports(report, cases, args.output_dir)
             print(f"[{result['status']}] {case['name']} round={repeat} tile={policy} {result.get('error', '')}", flush=True)
     finally:
+        if old_family is None:
+            os.environ.pop('CANN_EXECUTION_FAMILY', None)
+        else:
+            os.environ['CANN_EXECUTION_FAMILY'] = old_family
         if old_policy is None:
             os.environ.pop('CANN_MATMUL_TILE', None)
         else:

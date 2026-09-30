@@ -47,6 +47,10 @@ if os.environ.get('BAD_PLAN') and policy == '32x64':
     plan['policy'] = 'auto'
 if not os.environ.get('MISSING_PLAN'):
     (p / 'matmul_plan.json').write_text(json.dumps(plan))
+execution = dict(schema_version=3, family='gm', requested_family=os.environ['CANN_EXECUTION_FAMILY'],
+                 variant='mix', similarity_available=True, matmul=plan,
+                 **{k:plan[k] for k in ('tasks','blocks','available_cores','ub_bytes','problem')})
+(p / 'execution_plan.json').write_text(json.dumps(execution))
 for i in range(int(sys.argv[3])):
     data = (p / 'golden_y.bin').read_bytes()
     if os.environ.get('BAD_OUTPUT') and policy == '80x144':
@@ -76,7 +80,7 @@ count = 1 if os.environ.get('BAD_COUNT') else 2
 ''')
         profiler.chmod(0o755)
         env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
-                   CANN_MATMUL_TILE='invalid_inherited_value')
+                   CANN_MATMUL_TILE='invalid_inherited_value', CANN_EXECUTION_FAMILY='small')
         for name in ('BAD_PLAN', 'BAD_OUTPUT', 'MISSING_PLAN', 'BAD_PROFILE', 'BAD_COUNT', 'EXTRA_GROUP'):
             env.pop(name, None)
         return runner, env
@@ -99,6 +103,7 @@ count = 1 if os.environ.get('BAD_COUNT') else 2
             self.assertNotEqual(first, second)
             for result in report['results']:
                 self.assertEqual(result['requested_policy'], result['matmul_plan']['policy'])
+                self.assertEqual(result['execution_plan']['requested_family'], 'gm')
                 self.assertEqual(result['matmul_plan'], result['profile']['matmul_plan'])
             first_directory = out / report['results'][0]['directory']
             for filename in ('x1.bin', 'x2.bin'):

@@ -1,0 +1,59 @@
+#ifndef CANN_MATCH_SMALL_PLAN_H
+#define CANN_MATCH_SMALL_PLAN_H
+#include "matmul_plan.h"
+namespace local_baseline {
+enum class ExecutionFamily : uint32_t { Auto = 0, Gm = 1, Small = 2 };
+enum class SmallVariant : uint32_t { None = 0, Dot = 1, Rows = 2 };
+struct SmallPlan {
+    SmallVariant variant = SmallVariant::None;
+    uint32_t aRows = 0, aWidth = 0, aPitch = 0, aElements = 0;
+    uint32_t bRows = 0, bWidth = 0, bPitch = 0, bElements = 0;
+    uint32_t ubBytes = 0, tasks = 0, blocks = 0;
+};
+inline SmallPlan MakeSmallPlan(const ProblemDesc& p, const HardwareCaps& caps)
+{
+    // The generic path owns invalid-input diagnostics and tensor overflow checks.
+    if (!p.batches || !p.m || p.m>8192 || !p.n || p.n>8192 || !p.k || p.k>8192 ||
+        (p.dtype!=1 && p.dtype!=2) || !caps.cores || caps.cores>65535)
+        throw std::runtime_error("invalid small-path problem");
+    PlanProduct(PlanProduct(p.batches,p.m), uint64_t(p.n)*4);
+    if (p.batches>32 || p.m>16 || p.n>64 || p.k>256 || p.k%8 || uint64_t(p.m)*p.n*p.k>32768)
+        return {};
+    SmallPlan s;
+    if ((!p.ta || p.m==1) && (p.tb || p.n==1)) {
+        s.variant=SmallVariant::Dot;
+        s.aRows=p.m; s.aWidth=p.k; s.bRows=p.n; s.bWidth=p.k;
+    } else if (!p.tb && p.m*p.k<=64) {
+        s.variant=SmallVariant::Rows;
+        s.aRows=p.ta?p.k:p.m; s.aWidth=p.ta?p.m:p.k;
+        s.bRows=p.k; s.bWidth=p.n;
+    } else return {};
+    s.aPitch=CeilDiv(s.aWidth,16)*16; s.bPitch=CeilDiv(s.bWidth,16)*16;
+    s.aElements=s.aRows*s.aPitch; s.bElements=s.bRows*s.bPitch;
+    // Input queues + decoded FP32 inputs + 256/64 float work + 2x32-byte buffers.
+    s.ubBytes=6*(s.aElements+s.bElements)+1344;
+    if (caps.ubBytes<=32768 || s.ubBytes>std::min<uint64_t>(65536,caps.ubBytes-32768)) return {};
+    s.tasks=static_cast<uint32_t>((p.batches+7)/8);
+    s.blocks=std::min(s.tasks,caps.cores);
+    return s;
+}
+inline bool UseSmallAutomatically(const ProblemDesc& p, const SmallPlan& s)
+{
+    if(s.variant==SmallVariant::None || s.tasks>s.blocks) return false;
+    const uint64_t owned=std::min<uint64_t>(p.batches,8);
+    // Experimental, deliberately narrow online candidate; not measured thresholds.
+    return s.variant==SmallVariant::Dot ? owned*p.m*p.n<=16 : owned*p.m*p.k<=32;
+}
+inline bool SelectSmall(const ProblemDesc& p, const SmallPlan& s, TileRequest tile, ExecutionFamily family)
+{
+    if (family == ExecutionFamily::Small) {
+        if (tile.m || tile.n) throw std::runtime_error("small family conflicts with fixed Matmul tile");
+        if (s.variant == SmallVariant::None) throw std::runtime_error("unsupported forced small problem");
+        return true;
+    }
+    if (family == ExecutionFamily::Gm) return false;
+    if (family != ExecutionFamily::Auto) throw std::runtime_error("invalid execution family");
+    return !tile.m && !tile.n && UseSmallAutomatically(p, s);
+}
+} // namespace local_baseline
+#endif

@@ -6,9 +6,10 @@ for argument in "$@"; do
     case "$argument" in
         --generate-only) GENERATE_ONLY=1 ;;
         -h|--help)
-            echo 'Usage: bash scripts/run_local.sh [--suite smoke|full|reduction|tiling|generated] [--case NAME] [--device 0] [--repeat 2] [--timeout 120] [--generate-only] [--no-dump-similarity]'
+            echo 'Usage: bash scripts/run_local.sh [--suite smoke|full|reduction|tiling|generated|small] [--case NAME] [--device 0] [--repeat 2] [--timeout 120] [--generate-only] [--no-dump-similarity]'
             echo 'Generated suite: --case-count 64 --case-seed 20260930 --case-cores 24 (boundary hint only).'
             echo 'Local tile experiment: CANN_MATMUL_TILE=auto|MxN; M/N: 16-aligned, 16..256 (default auto).'
+            echo 'Optional family override: CANN_EXECUTION_FAMILY=auto|gm|small; online always uses auto.'
             exit 0 ;;
         --output-dir|--binary|--output-dir=*|--binary=*)
             echo 'run_local.sh manages unique output/build paths; use local_baseline.py directly for custom paths.' >&2
@@ -39,7 +40,7 @@ run_all() {
     echo 'LOCAL_BASELINE; ONLINE_EVALUATION=NOT_RUN'
     git -C "$PROJECT_ROOT" rev-parse HEAD
     git -C "$PROJECT_ROOT" status --short
-    sha256sum "$PROJECT_ROOT/kernel.asc" "$PROJECT_ROOT/matmul_plan.h"
+    sha256sum "$PROJECT_ROOT/kernel.asc" "$PROJECT_ROOT/matmul_plan.h" "$PROJECT_ROOT/small_plan.h" "$PROJECT_ROOT/small_vector.h"
     printf 'ASCEND_HOME_PATH=%s\n' "${ASCEND_HOME_PATH:-<unset>}"
     if [ "$GENERATE_ONLY" -eq 1 ]; then
         python3 "$PROJECT_ROOT/scripts/local_baseline.py" --output-dir "$RUN_DIR/cases" "$@"

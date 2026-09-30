@@ -170,7 +170,7 @@ def sha256(path):
 def provenance(binary):
     environment = {key: os.environ.get(key) for key in (
         "ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME", "ASCEND_VISIBLE_DEVICES",
-        "ASCEND_RT_VISIBLE_DEVICES", "NPU_ARCH", "CANN_MATMUL_TILE")}
+        "ASCEND_RT_VISIBLE_DEVICES", "NPU_ARCH", "CANN_MATMUL_TILE", "CANN_EXECUTION_FAMILY")}
     result = dict(git=capture(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
                   git_status=capture(["git", "-C", str(ROOT), "status", "--short"]),
                   kernel_sha256=sha256(ROOT / "kernel.asc"), environment=environment,
@@ -180,6 +180,7 @@ def provenance(binary):
                       ROOT / "local/runner.asc", ROOT / "local/CMakeLists.txt",
                       ROOT / "scripts/local_baseline.py", ROOT / "scripts/perf_local.py",
                       ROOT / "scripts/tile_sweep.py", ROOT / "matmul_plan.h",
+                      ROOT / "small_plan.h", ROOT / "small_vector.h",
                       ROOT / "scripts/case_rules.py", ROOT / "scripts/plan_metadata.py")})
     if binary:
         result["binary"] = str(binary)
@@ -245,6 +246,9 @@ def collect_profile(args, case, directory):
     plan = baseline.read_matmul_plan(directory, case)
     if plan is not None:
         result["matmul_plan"] = plan
+    execution = baseline.read_execution_plan(directory, case, os.environ.get("CANN_EXECUTION_FAMILY", "auto"))
+    if execution is not None:
+        result["execution_plan"] = execution
     return result
 
 
@@ -260,6 +264,9 @@ def write_reports(report, output):
         stats = result.get("host_call", {})
         plan = result.get("matmul_plan")
         tile = f"{plan['tile_m']}×{plan['tile_n']}; {plan['tasks']}/{plan['blocks']}" if plan else "—"
+        execution = result.get("execution_plan", {})
+        if execution.get("family") == "small":
+            tile = f"small/{execution['variant']}; {execution['tasks']}/{execution['blocks']}"
         lines.append(f"| {result['case']['name']} | {result['status']} | {tile} | {stats.get('median_us', '—')} | "
                      f"{stats.get('p95_us', '—')} | {stats.get('samples', '—')} |")
     for result in report["results"]:
@@ -285,6 +292,8 @@ def measure_case(args, case, directory):
             result["host_call"] = read_host_timings(directory / "host_timings.csv", args.warmup, args.iterations)
             if args.profile != "none":
                 result["profile"] = collect_profile(args, case, directory / "profile_run")
+                if result.get("execution_plan") != result["profile"].get("execution_plan"):
+                    raise ValueError("profile and host measurement used different execution plans")
                 if result.get("matmul_plan") != result["profile"].get("matmul_plan"):
                     raise ValueError("profile and host measurement used different Matmul plans")
         except (OSError, ValueError, subprocess.TimeoutExpired) as error:
@@ -362,7 +371,8 @@ def main():
                   suite=args.suite, options={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                   provenance=provenance(args.binary), results=[])
     shutil.copyfile(ROOT / "kernel.asc", args.output_dir / "kernel_snapshot.asc")
-    shutil.copyfile(ROOT / "matmul_plan.h", args.output_dir / "matmul_plan.h")
+    for header in ("matmul_plan.h", "small_plan.h", "small_vector.h"):
+        shutil.copyfile(ROOT / header, args.output_dir / header)
     print("LOCAL_PERFORMANCE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     if args.tile_sweep:
         return tile_sweep.run(args, cases, report, measure_case)
