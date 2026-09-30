@@ -78,6 +78,52 @@ done
 
 回传 `report.json` 和 `report.md` 即可先分析；最终验收和得分仍以线上评测为准。
 
+## 一次构建采集分块矩阵
+
+`--tile-sweep` 复用同一次构建，针对相同输入依次测试四种固定 tile 和当前 `auto` 策略。它收集选路所需的数据，不修改 kernel 或自动生成决策树。
+
+在 NPU 机器运行：
+
+```bash
+git pull --ff-only
+source /usr/local/Ascend/cann-9.1.0/set_env.sh
+bash scripts/run_perf.sh --suite stress --tile-sweep
+```
+
+默认 48 个输入 × 5 种策略 × 2 轮，共 480 次 runner 运行。每次仍有 2 次正确性检查、3 次 warmup 和 30 次 Host 计时；各策略使用相同 shape、数据类型、布局、输入分布和随机种子。候选串行执行，随用例和轮次旋转顺序，减轻顺序偏差；轮换并不能排除温度、频率或其他任务干扰。不要同时运行其他性能测试。
+
+脚本覆盖继承的 `CANN_MATMUL_TILE`，以每个 runner 写出的 `matmul_plan.json` 验证实际策略。缺少计划、请求与实际策略不符、不同轮次的计划变化、精度或 profiling 失败时，不为该用例宣布优胜者，并以非零退出。报告逐次保存，失败的日志仍保留。每次运行使用新目录，不混入旧样本。
+
+默认比较 **Host 调用耗时**，包含 tiling 和分配/释放，适合先检查覆盖和明显趋势。设备比较需要显式采集 profiling，可以先针对一个代表性输入：
+
+```bash
+bash scripts/run_perf.sh --suite stress --tile-sweep \
+  --case sweep_m8192_fp16_00 --profile timeline
+```
+
+省略 `--case` 会对全部输入采集，耗时更长。`--sweep-rounds 1` 可用于初步排查，重复轮次更多才有跨轮波动信息。设备排名只接受预期的单个 `MatmulMaxSum` / `MIX_AIC` 任务组及正确记录数；若 CANN 导出形式不同会报错，保留原始 CSV 后再适配，不能擅自相加。设备统计来自独立 profiling 运行，含首次调用；不会用 Host 耗时补缺，也不与 Host 耗时相减。
+
+报告位于新建 run 目录的 `cases/` 下：
+
+| 文件 | 内容 |
+| --- | --- |
+| `report.md` | 每个输入的五策略耗时、观测最快策略、`auto/最快` 比值、接近最快的候选和错误信息 |
+| `report.json` | 每一轮的原始统计、精度、实际分块、profiling 汇总、版本信息及聚合结果 |
+| `sweep.csv` | 每个输入 × 策略一行，便于画图或归纳规则；同时保留 Host/设备两种口径 |
+| `<case>/round-<轮次>/<策略>/` | 输入、输出、原始 Host 样本、runner 日志和可选的 profiling 文件 |
+
+聚合耗时是各轮中位数的中位数，同时保存各轮中位数和 p95。`near_best` 包含比观测最快慢不超过 3%，或跨轮中位数范围与其重叠的候选；这是启发式提示，不是统计置信区间。只差一点的配置不应据此立即形成新的选择分支。固定 `32x64` 是同一新版二进制的固定几何配置，不代表旧提交的完整实现。
+
+CSV 的任务数、轮数、活跃核比例、所有轮次的任务槽占用比例、外层 tile 有效面积比例、FLOPs 和 similarity 大小均由实际 plan 与输入元数据推导。任务槽占用比例为 `tasks/(waves*blocks)`，不是仅最后一轮的占用比例。它们是几何/工作量特征，不是测得的硬件利用率，外层 tile 也不等于 Matmul 内部基本块。
+
+无 NPU 的开发机可先验证输入与实验规模：
+
+```bash
+bash scripts/run_perf.sh --suite stress --tile-sweep --generate-only
+```
+
+此模式每个输入仅生成一份数据，记录全部计划运行项，状态为 GENERATED，不产生耗时或排名。本地脚本只为后续分析收集证据；没有真实设备结果前，不据此更新 Host 选择器或声称提速。
+
 ## 开发机检查记录
 
 - `python3 -m unittest discover -s tests -v`：41 项通过，包含实际 C++ 分块/地址函数的 CPU 检查和 host/profile 分块不一致的失败检查。

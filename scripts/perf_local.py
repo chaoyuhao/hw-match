@@ -18,6 +18,7 @@ import tempfile
 import time
 
 import local_baseline as baseline
+import tile_sweep
 
 ROOT = Path(__file__).resolve().parents[1]
 METRICS = ("PipeUtilization", "ArithmeticUtilization", "Memory", "MemoryL0", "MemoryUB",
@@ -176,7 +177,8 @@ def provenance(binary):
                   compiler=capture(["bisheng", "--version"]), npu=capture(["npu-smi", "info"]),
                   source_sha256={str(p.relative_to(ROOT)): sha256(p) for p in (
                       ROOT / "local/runner.asc", ROOT / "local/CMakeLists.txt",
-                      ROOT / "scripts/local_baseline.py", ROOT / "scripts/perf_local.py")})
+                      ROOT / "scripts/local_baseline.py", ROOT / "scripts/perf_local.py",
+                      ROOT / "scripts/tile_sweep.py")})
     if binary:
         result["binary"] = str(binary)
         result["binary_sha256"] = sha256(binary)
@@ -273,6 +275,22 @@ def write_reports(report, output):
     (output / "report.md").write_text("\n".join(lines) + "\n")
 
 
+def measure_case(args, case, directory):
+    result = baseline.run_case(args.binary, case, directory, args.device, 2, args.timeout,
+                               False, benchmark=(args.warmup, args.iterations))
+    if result["status"] == "PASS":
+        try:
+            result["host_call"] = read_host_timings(directory / "host_timings.csv", args.warmup, args.iterations)
+            if args.profile != "none":
+                result["profile"] = collect_profile(args, case, directory / "profile_run")
+                if result.get("matmul_plan") != result["profile"].get("matmul_plan"):
+                    raise ValueError("profile and host measurement used different Matmul plans")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            result.update(status="FAIL", error=str(error))
+    (directory / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
@@ -287,11 +305,17 @@ def main():
     parser.add_argument("--metrics", choices=METRICS, default="PipeUtilization")
     parser.add_argument("--profile-repeat", type=int, default=5)
     parser.add_argument("--compare", type=Path)
+    parser.add_argument("--tile-sweep", action="store_true", help="compare four fixed tiles plus auto, sequentially")
+    parser.add_argument("--sweep-rounds", type=int, default=2, help="tile sweep repetitions with rotated order (default: 2)")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--inspect-tools", action="store_true")
     modes.add_argument("--list-cases", action="store_true")
     modes.add_argument("--generate-only", action="store_true")
     args = parser.parse_args()
+    if not 1 <= args.sweep_rounds <= 20:
+        parser.error("--sweep-rounds must be between 1 and 20")
+    if args.tile_sweep and (args.compare or args.inspect_tools):
+        parser.error("--tile-sweep cannot be combined with --compare or --inspect-tools")
     if args.device < 0 or not 0 <= args.warmup <= 1000 or not 1 <= args.iterations <= 10000 or not 1 <= args.profile_repeat <= 1000 or args.timeout < 1:
         parser.error("invalid device/warmup/iterations/profile-repeat/timeout")
     cases = performance_cases(args.suite)
@@ -333,6 +357,8 @@ def main():
                   provenance=provenance(args.binary), results=[])
     shutil.copyfile(ROOT / "kernel.asc", args.output_dir / "kernel_snapshot.asc")
     print("LOCAL_PERFORMANCE; ONLINE_EVALUATION=NOT_RUN", flush=True)
+    if args.tile_sweep:
+        return tile_sweep.run(args, cases, report, measure_case)
     for case in cases:
         directory = args.output_dir / case["name"]
         print(f"[RUN] {case['name']}", flush=True)
@@ -340,18 +366,7 @@ def main():
             baseline.make_case(case, directory)
             result = dict(case=case, status="GENERATED")
         else:
-            result = baseline.run_case(args.binary, case, directory, args.device, 2, args.timeout,
-                                       False, benchmark=(args.warmup, args.iterations))
-            if result["status"] == "PASS":
-                try:
-                    result["host_call"] = read_host_timings(directory / "host_timings.csv", args.warmup, args.iterations)
-                    if args.profile != "none":
-                        result["profile"] = collect_profile(args, case, directory / "profile_run")
-                        if result.get("matmul_plan") != result["profile"].get("matmul_plan"):
-                            raise ValueError("profile and host measurement used different Matmul plans")
-                except (OSError, ValueError, subprocess.TimeoutExpired) as error:
-                    result.update(status="FAIL", error=str(error))
-            (directory / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+            result = measure_case(args, case, directory)
         # This describes the unchanged reference kernel, not a hardware measurement.
         result["reference_work"] = dict(matmul_flops=2 * case["b"] * case["m"] * case["n"] * case["k"],
                                        full_similarity_bytes=4 * case["b"] * case["m"] * ((case["n"] + 15) // 16 * 16))

@@ -4,6 +4,8 @@
 
 本地性能分析：先运行 `bash scripts/run_perf.sh --inspect-tools`，再运行 `bash scripts/run_perf.sh --suite quick`；压力测试、msprof 采集与报告说明见 [性能基础设施](docs/LOCAL_PERFORMANCE.md)。
 
+分块对比采样：运行 `bash scripts/run_perf.sh --suite stress --tile-sweep`，一次构建比较四种固定 tile 和 `auto`；默认两轮并保存 JSON/CSV/Markdown。增加 `--profile timeline` 可比较设备 Task Duration，详见 [分块矩阵采样](docs/MATMUL_TILING.md#一次构建采集分块矩阵)。
+
 官方资料补充：[cann-learning-hub 调研](docs/LEARNING_HUB_REVIEW.md)，对照当前实现整理 CV 融合示例、源码级仿真、尾轮调度与模板特化；本地资料克隆目录已忽略。
 
 已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h` 文件。当前实现只需复制 `kernel.asc`，无需新增文件。
