@@ -15,10 +15,11 @@ enum { PIPE_V, PIPE_ALL };
 inline void require(bool ok, const char* text) { if (!ok) throw std::runtime_error(text); }
 namespace AscendC {
 static uint32_t blockIdx, blockNum;
+static uint64_t scalarReads = 0;
 inline uint32_t GetBlockIdx() { return blockIdx; }
 inline uint32_t GetBlockNum() { return blockNum; }
 enum class TPosition { VECIN, VECOUT, VECCALC };
-enum class HardEvent { MTE2_S, S_MTE2, S_MTE3, MTE3_S };
+enum class HardEvent { MTE2_S, S_MTE2, S_MTE3, MTE3_S, V_S, S_V };
 enum class ReduceOrder { ORDER_ONLY_VALUE };
 template <int P> void PipeBarrier() {}
 template <HardEvent E> void SetFlag(int) {}
@@ -58,7 +59,8 @@ template <typename T> struct LocalTensor {
     std::shared_ptr<std::vector<float>> data;
     size_t offset = 0;
     LocalTensor operator[](size_t i) const { return {data, offset + i}; }
-    float GetValue(size_t i) const { return data->at(offset + i); }
+    float LaneValue(size_t i) const { return data->at(offset + i); }
+    float GetValue(size_t i) const { ++scalarReads; return LaneValue(i); }
     void SetValue(size_t i, float v) const { data->at(offset + i) = v; }
 };
 template <typename T> struct GlobalTensor {
@@ -113,14 +115,37 @@ inline void DataCopy(LocalTensor<float> dst, GlobalTensor<float> src, uint32_t n
 }
 inline void DataCopy(GlobalTensor<float> dst, LocalTensor<float> src, uint32_t n) {
     require(n % 8 == 0 && reinterpret_cast<uintptr_t>(dst.data) % 32 == 0, "unaligned tile write");
-    for (uint32_t i = 0; i < n; ++i) writeGm(dst.data + i, src.GetValue(i));
+    for (uint32_t i = 0; i < n; ++i) writeGm(dst.data + i, src.LaneValue(i));
 }
 inline void DataCopyPad(GlobalTensor<float> dst, LocalTensor<float> src, DataCopyExtParams p) {
     require(p.blockCount == 1 && p.blockLen % 4 == 0, "unexpected output copy");
-    for (uint32_t i = 0; i < p.blockLen / 4; ++i) writeGm(dst.data + i, src.GetValue(i));
+    for (uint32_t i = 0; i < p.blockLen / 4; ++i) writeGm(dst.data + i, src.LaneValue(i));
 }
 inline void Duplicate(LocalTensor<float> dst, float value, uint32_t n) {
+    require(dst.offset % 8 == 0, "unaligned vector fill");
     for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, value);
+}
+template <typename Op>
+inline void binary(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b, uint32_t n, Op op) {
+    require(dst.offset % 8 == 0 && a.offset % 8 == 0 && b.offset % 8 == 0, "unaligned vector arithmetic");
+    for (uint32_t i = 0; i < n; ++i) {
+        const float x = a.LaneValue(i), y = b.LaneValue(i);
+        require(std::isfinite(x) && std::isfinite(y), "vector arithmetic read invalid lane");
+        dst.SetValue(i, op(x, y));
+    }
+}
+inline void Add(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b, uint32_t n) {
+    binary(dst, a, b, n, [](float x, float y) { return x + y; });
+}
+inline void Sub(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b, uint32_t n) {
+    binary(dst, a, b, n, [](float x, float y) { return x - y; });
+}
+inline void Muls(LocalTensor<float> dst, LocalTensor<float> a, float v, uint32_t n) {
+    require(dst.offset % 8 == 0 && a.offset % 8 == 0, "unaligned vector scale");
+    for (uint32_t i = 0; i < n; ++i) {
+        require(std::isfinite(a.LaneValue(i)), "vector scale read invalid lane");
+        dst.SetValue(i, a.LaneValue(i) * v);
+    }
 }
 inline void WholeReduceMax(LocalTensor<float> dst, LocalTensor<float> src, int mask, int repeats,
                            int dstStride, int blockStride, int repeatStride, ReduceOrder) {
@@ -128,7 +153,7 @@ inline void WholeReduceMax(LocalTensor<float> dst, LocalTensor<float> src, int m
     for (int r = 0; r < repeats; ++r) {
         float value = -std::numeric_limits<float>::infinity();
         for (int i = 0; i < mask; ++i) {
-            const float item = src.GetValue(r * repeatStride * 8 + (i / 8) * blockStride * 8 + i % 8);
+            const float item = src.LaneValue(r * repeatStride * 8 + (i / 8) * blockStride * 8 + i % 8);
             require(std::isfinite(item), "masked reduction read invalid/uninitialized lane");
             value = std::max(value, item);
         }
@@ -136,6 +161,6 @@ inline void WholeReduceMax(LocalTensor<float> dst, LocalTensor<float> src, int m
     }
 }
 inline void Max(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b, uint32_t n) {
-    for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, std::max(a.GetValue(i), b.GetValue(i)));
+    for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, std::max(a.LaneValue(i), b.LaneValue(i)));
 }
 } // namespace AscendC

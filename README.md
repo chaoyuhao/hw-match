@@ -4,7 +4,7 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R11**（代码 `9aa9f56`）：多列 Dot 改为 repeat 批量点积，在 Vector 内累加 K 分段并求行最大值，每行只进行一次标量交接；列块由 N/K/UB 决定。small/GM 自动分派范围保持 R10，Rows 与 N=1 沿用原实现。相对 R10，线上需同时替换 **small_plan.h、small_vector.h**。已收到 S7 精度全部通过，但性能收益未成立。R10/S6 保留为后续对照；本次只更新记录，未回退算子。
+当前源码版本 **R12**：通用 MIX 路径最后的 Sum 改为向量补偿树，每 1024 行最多合并 8 对主值/残差，Scalar 只处理缩减后的部分结果。Matmul、行最大值、small 路径和分派规则保持 R11。相对 R11，线上只需替换 **kernel.asc**。本轮尚无线上结果，最新 S7 仍属于 R11；具体算法和验证边界见 [归约优化](docs/PARALLEL_REDUCTION.md)。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 

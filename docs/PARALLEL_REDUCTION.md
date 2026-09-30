@@ -1,4 +1,30 @@
-# 第一轮优化：并行行最大值
+# 并行行最大值与最终求和
+
+## R12：向量补偿树替换逐行标量求和（2026-09-30）
+
+本轮只修改 `kernel.asc` 中通用 MIX 路径的 `SumRowMaxima`。线上对照为当前 R11/S7；Matmul、行最大值、两次全核同步、small 路径、分派规则、GM scratch 和输出 owner 均保持原逻辑。`matmul_plan.h` 仅更新 UB 用量注释，选择行为不变。已有 R11 文件时，线上只需替换 **kernel.asc**，没有新增提交文件。
+
+原来每个 batch 按 M 行逐项 `GetValue` 后串行 FP32 Kahan 相加。现在仍每次读取最多 1024 个行最大值，但在 Vector 上做固定的补偿树：
+
+1. 只复制真实行，DMA 补齐到 8 个 float 时填零，再将有效 UB 区间补零到最近的 2 的幂，最少 8、最多 1024。`ComputeRowMaxima` 的尾行哨兵是负数，不能参与 Sum。
+2. 每层将左右两半相加。用 TwoSum 的向量 Add/Sub 保留主值相加的舍入残差，并合并左右子树的低位部分；主值用 Muls(1) 写回。每个向量操作之间显式建立 PIPE_V 依赖，所有源偏移保持 32 字节对齐。
+3. 归约到 8 个 lane 后停止：每块最多读回 8 个主值和 8 个残差。Scalar 用 Neumaier 补偿合并，补偿跨 lane、跨 1024 行块保留，最后输出 `sum + compensation`。不足 9 行直接合并真实行，无须读取残差。
+
+以 M=8192 为例，原来每个 batch 有 **8192 次标量读**，新实现为 **128 次**，结构上减少 64 倍；同时增加向量计算与同步，**不能把读数变化当成端到端加速比**。它没有消除最终输出 owner 的集中，也没有融合 similarity 的生产与消费。
+
+普通树形求和不能恢复子树中已经丢掉的小量。例如 `[4096, 2^-12, 2^-12, -4096]` 跨块时，单独对每块做普通 FP32 求和再补偿可能失去残差。本轮采用补偿树正是为保护这类输入；它仍是 FP32 算法，不声称任意输入下与 FP64 逐位相同。README 要求 Max(N) 在 Sum(M) 前完成和重复结果一致，没有要求串行 Kahan 顺序。
+
+新增 UB：1024 个残差 float + 三组 512 个临时 float，共 10240 字节；归约阶段累计申请由 37152 增为 **47392 字节**，仍在现有 64 KiB 预留内，Matmul 预算不变。输入队列提供 MTE2→Vector 依赖；V_S 保护 Scalar 读取，S_V 和 S_MTE2 分别保护残差/输入缓冲后续复用；原输出写回依赖保持。
+
+CPU 检查运行实际 device helper，新增固定边界与强抵消输入，使用独立 FP64 或更高精度 golden，检查尾部哨兵、输出 guard、唯一 writer、输入不变、重复输出逐位相同，以及每 1024 行最多 32 次标量读取的上限。新增工作量检查已确认旧实现失败、新实现通过；它不是 NPU 性能测试。完整主机回归 `python3 -m unittest discover -s tests -v`：**62 项通过，52.867 秒**。CPU 替身不模拟异步流水、真实指令舍入或 CANN 编译。
+
+按用户要求，本轮不安排本地 NPU 验证。当前状态：`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。后续线上表与 S7 对比，重点观察点 13 和其他通用路径；没有实际分派证据时，不将点号当成 shape。
+
+接口核对：[CANN 9.0 对齐与地址重叠约束](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0004.html)。普通 WholeReduceSum 使用树形相加，但不会自动携带本实现需要的舍入残差，见 [WholeReduceSum](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0081.html)。
+
+## R4 历史记录：并行行最大值
+
+以下记录描述 R4，不代表 R12 已在设备上验证；其中 NPU 命令保留为可选历史入口，不作为当前迭代前置条件。
 
 参照版本是 `d01d01b`：本地 `B=1,M=8192,N=65,K=32,FP16,transpose=00` 的 host median 为 **3448.2545 μs**，独立 profiler 的 Task Duration median 为 **3412.408 μs**。并行归约版本 `72abad1` 在相同 CANN 9.1.0 / 910B2C 环境下，该例 PASS，host median 为 **358.3775 μs**，Task Duration median 为 **324.048 μs**，分别快 **9.62× / 10.53×**；源码哈希和采样配置已核对，普通重复及 profiling 输出误差均为 0。报告位于 `build-perf/run-20260929T2225/`。
 

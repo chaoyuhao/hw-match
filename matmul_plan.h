@@ -51,7 +51,7 @@ inline MatmulPlan MakePlan(const ProblemDesc& p, const HardwareCaps& h, TileRequ
     const double traffic = 2.0 * p.k * (std::min(p.m, t.m) * (p.ta ? 1.25 : 1.0) +
                                        std::min(p.n, t.n) * (p.tb ? 1.0 : 1.25));
     const double score = waves * (work + 16.0 * traffic + 65536.0);
-    // Current reduction buffers use 37152 bytes. Reserve 64 KiB including
+    // Current reduction buffers use 47392 bytes. Reserve 64 KiB including
     // headroom; retain the previous 128 KiB Matmul ceiling. SDK validates inner tiles.
     const uint32_t budget = static_cast<uint32_t>(std::min<uint64_t>(128 * 1024, h.ubBytes - 64 * 1024));
     return {t.m, t.n, tasks, blocks, budget, score};

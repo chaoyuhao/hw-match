@@ -47,8 +47,11 @@ class ParallelReductionTests(unittest.TestCase):
     def test_task_reuse_idle_cores_and_batch_groups_have_unique_output_owners(self):
         self.run_family(1)
 
-    def test_ordered_sum_preserves_cancellation_across_chunk_boundaries(self):
+    def test_sum_preserves_cancellation_across_chunk_boundaries(self):
         self.run_family(2)
+
+    def test_sum_fp64_golden_padding_and_bounded_scalar_work(self):
+        self.run_family(3)
 
 
 if __name__ == "__main__":
