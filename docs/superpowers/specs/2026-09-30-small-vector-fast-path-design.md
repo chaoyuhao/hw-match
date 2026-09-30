@@ -77,7 +77,17 @@ R9 的 S5 未见明显新增收益，用户授权继续扩展前置候选。R10 
 
 auto 沿用 Dot 每 owner 点积数≤128、Rows 更新次数≤256 及单波限制；所以 B 的有效上限随可用核心数变化，较大 M 也要经过工作量和 UB 限制。候选生成与自动启用分开，避免把能放下等同于更快。任务组数在窄化到 uint32 前检查溢出。
 
-R10 尚未在线上运行；本轮只做必要主机检查与独立审查，不增加本地 NPU 前置环节。具体版本、验证结论和后续 S6 均记在统一迭代记录。
+R10 已收到 S6：15/15 通过，点 2 耗时下降 10.31%，其余小幅变化。具体版本、原始测量及判读见统一迭代记录。
+
+## R11 实施更新：批量 Dot
+
+用户在 S6 后要求继续改变计算机制。保留 small/GM 分派范围，仅把多列 Dot 改为列块 repeat 计算。候选宽度由 `min(N,8/16/32/64)` 生成；UB 合法性检查后比较 Vector API 调用次数，同分选较小缓冲。列块未覆盖全部 N 时，列宽必须是 8 个 float 的倍数，确保后续 Add 起址 32B 对齐；单块可处理任意实际 N≤64。
+
+输入 padding/转换及 output owner 沿用。FP32 product 缓冲是 `[列块,64]`，按 K 分段复用；每段 Mul 使用 A repeat stride 0、B repeat stride 为实际 FP32 行距。WholeReduceSum 以 element 单位的 dstRepStride=1 写连续列分数；跨 K 分段 Add 仍按旧顺序相加。全部 K 完成后沿真实 N 取最大值，最后每行一次 Scalar 读取，再按旧 M 顺序补偿求和。
+
+实际 UB 为 `6×(A_padded+B_padded)+4×(64×C+align8(C))+288`：输入队列和 FP32 副本、列块 product、K 分段 partial、64-float 行分数及 32B 输出。先检查旧 Dot 基线可容纳，再选择新缓冲；N=1 或没有合法列块时沿用原 Dot，保持原 small 覆盖。Rows 不变。
+
+本轮仍未获得设备编译或加速证据。CPU 检查要求资源/步长/mask 与分派契约、FP64 golden、未初始化读取及边界保护；另对相同 Dot 的旧/新 CPU 实现验证原 K 分段相加顺序未变。该逐位对照不扩展为不同算法族或真实设备的逐位等价要求。线上只替换配套的 small_plan.h 与 small_vector.h。
 
 ## 官方接口依据
 
@@ -86,3 +96,6 @@ R10 尚未在线上运行；本轮只做必要主机检查与独立审查，不�
 [CANN 9.0 Cast](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0073.html) 说明 half/bfloat16 与 float 的转换支持；实现需以 Atlas A2 对应表及实际 SDK 编译为准。
 
 [CANN 9.0 ReduceSum](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0078.html) 给出 FP32、对齐及临时空间约束，并提醒软件实现的 ReduceSum 在部分场景可能比基础归约指令慢。可据此比较短 K 下的 [WholeReduceSum](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0081.html)；不能仅因为函数名是归约就假设成本很低。
+
+
+R11 新用的 [CANN 9.0 Mul 高维切分接口](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0037.html) 支持 FP32 mask/repeat 和 BinaryRepeatParams；[WholeReduceSum](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0081.html) 的目的 repeat 步长单位是元素，FP32 目的地址要求 4B 对齐、源地址要求 32B 对齐。[Add](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0035.html) 操作数要求 32B 对齐；本实现仅同地址原位更新，遵守[重叠约束](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0004.html)。文档依据不替代真实 SDK 编译。

@@ -4,7 +4,7 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前待评测版本 **R10**：移除 B≤32、M≤16、Rows MK≤64 等固定候选门槛，由实际 UB 与每核工作量决定能否启用。N≤64、K≤256、布局支持以及 R9 的 128/256 预算保持不变。相对 R9，线上只需更新 `small_plan.h`；已收到 S6 全部通过；下一轮推进设备侧批量点积与归约。
+当前待评测版本 **R11**（代码 `9aa9f56`）：多列 Dot 改为 repeat 批量点积，在 Vector 内累加 K 分段并求行最大值，每行只进行一次标量交接；列块由 N/K/UB 决定。small/GM 自动分派范围保持 R10，Rows 与 N=1 沿用原实现。相对 R10，线上需同时替换 **small_plan.h、small_vector.h**。等待 S7，不能沿用 S6 的通过记录。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
