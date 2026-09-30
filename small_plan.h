@@ -17,13 +17,19 @@ inline SmallPlan MakeSmallPlan(const ProblemDesc& p, const HardwareCaps& caps)
         (p.dtype!=1 && p.dtype!=2) || !caps.cores || caps.cores>65535)
         throw std::runtime_error("invalid small-path problem");
     PlanProduct(PlanProduct(p.batches,p.m), uint64_t(p.n)*4);
-    if (p.batches>32 || p.m>16 || p.n>64 || p.k>256 || p.k%8 || uint64_t(p.m)*p.n*p.k>32768)
-        return {};
+    PlanProduct(PlanProduct(p.batches,p.m), uint64_t(p.k)*2);
+    PlanProduct(PlanProduct(p.batches,p.n), uint64_t(p.k)*2);
+    // These limits match the current N-vector and K-product scratch capacities.
+    // Batch count does not increase per-batch storage. Account for M and the
+    // physical layout below, then let the automatic work budget decide.
+    if (p.n>64 || p.k>256 || p.k%8) return {};
+    const uint64_t groups = p.batches/8 + (p.batches%8 != 0);
+    if (groups > std::numeric_limits<uint32_t>::max()) return {};
     SmallPlan s;
     if ((!p.ta || p.m==1) && (p.tb || p.n==1)) {
         s.variant=SmallVariant::Dot;
         s.aRows=p.m; s.aWidth=p.k; s.bRows=p.n; s.bWidth=p.k;
-    } else if (!p.tb && p.m*p.k<=64) {
+    } else if (!p.tb) {
         s.variant=SmallVariant::Rows;
         s.aRows=p.ta?p.k:p.m; s.aWidth=p.ta?p.m:p.k;
         s.bRows=p.k; s.bWidth=p.n;
@@ -33,11 +39,11 @@ inline SmallPlan MakeSmallPlan(const ProblemDesc& p, const HardwareCaps& caps)
     // Input queues + decoded FP32 inputs + 256/64 float work + 2x32-byte buffers.
     s.ubBytes=6*(s.aElements+s.bElements)+1344;
     if (caps.ubBytes<=32768 || s.ubBytes>std::min<uint64_t>(65536,caps.ubBytes-32768)) return {};
-    s.tasks=static_cast<uint32_t>((p.batches+7)/8);
+    s.tasks=static_cast<uint32_t>(groups);
     s.blocks=std::min(s.tasks,caps.cores);
     return s;
 }
-// R9 online experiment: per-owner work budgets, independent of UB/layout limits.
+// R9 work budgets retained in R10; candidate eligibility now follows storage capacity.
 constexpr uint32_t SMALL_AUTO_DOT_LIMIT = 128;  // complete dot products per group
 constexpr uint32_t SMALL_AUTO_ROWS_LIMIT = 256; // N-vector updates per group
 inline bool UseSmallAutomatically(const ProblemDesc& p, const SmallPlan& s)

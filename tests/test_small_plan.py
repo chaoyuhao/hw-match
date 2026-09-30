@@ -20,14 +20,13 @@ int main() {
   }
   assert(MakeSmallPlan({1,1,1,8,dtype,ta,tb},h).variant==SmallVariant::Dot);
  }
- for (uint64_t b : {1,7,8,9,16,17,32}) {
+ for (uint64_t b : {1,7,8,9,16,17,32,33,191,192}) {
   auto s=MakeSmallPlan({b,1,1,8,1,false,false},h);
   assert(s.tasks==(b+7)/8 && s.blocks==s.tasks);
  }
- for(auto p : {ProblemDesc{33,1,1,8,1,false,false}, ProblemDesc{1,17,1,8,1,false,false},
-  ProblemDesc{1,1,65,8,1,false,false}, ProblemDesc{1,1,1,264,1,false,false},
+ for(auto p : {ProblemDesc{1,1,65,8,1,false,false}, ProblemDesc{1,1,1,264,1,false,false},
   ProblemDesc{1,1,1,7,1,false,false}, ProblemDesc{1,16,64,256,1,false,true},
-  ProblemDesc{1,3,5,24,1,false,false}})
+  ProblemDesc{1,8192,1,8,1,false,false}})
   assert(MakeSmallPlan(p,h).variant==SmallVariant::None);
  assert(MakeSmallPlan({1,1,1,8,1,false,false},{24,32768}).variant==SmallVariant::None);
  // Coverage and fallback at both new per-owner budget boundaries.
@@ -39,6 +38,18 @@ int main() {
    Scenario{8,1,16,8,false,true,true},
    Scenario{8,1,17,8,false,true,false},
    Scenario{32,1,16,8,false,true,true},
+   Scenario{33,1,16,8,false,true,true},
+   Scenario{192,1,1,8,false,false,true},
+   Scenario{193,1,1,8,false,false,false},
+   Scenario{1,17,1,8,false,false,true},
+   Scenario{1,128,1,8,false,false,true},
+   Scenario{1,129,1,8,false,false,false},
+   Scenario{1,32,5,8,true,false,true},
+   Scenario{1,33,5,8,true,false,false},
+   Scenario{1,1,5,256,true,false,true},
+   Scenario{1,1,64,128,false,false,true},
+   Scenario{2,1,5,128,false,false,true},
+   Scenario{3,1,5,128,false,false,false},
    Scenario{1,1,5,64,false,false,true},
    Scenario{4,1,5,64,true,false,true},
    Scenario{5,1,5,64,false,false,false},
@@ -54,6 +65,20 @@ int main() {
    assert(SelectSmall(p,s,{},ExecutionFamily::Small));
   }
  }
+ // Per-batch memory is independent of B; reject task narrowing overflow.
+ const uint64_t largestB=uint64_t(UINT32_MAX)*8;
+ auto largest=MakeSmallPlan({largestB,1,1,8,1,false,false},h);
+ assert(largest.tasks==UINT32_MAX && largest.blocks==24);
+ assert(!UseSmallAutomatically({largestB,1,1,8,1,false,false},largest));
+ assert(MakeSmallPlan({largestB+1,1,1,8,1,false,false},h).variant==SmallVariant::None);
+ auto largeWork=MakeSmallPlan({1,200,64,8,1,false,true},h);
+ assert(largeWork.variant==SmallVariant::Dot && largeWork.ubBytes==26688);
+ assert(!UseSmallAutomatically({1,200,64,8,1,false,true},largeWork));
+ auto fits=MakeSmallPlan({1,1,64,128,1,false,false},h);
+ assert(fits.variant==SmallVariant::Rows && fits.ubBytes==51264);
+ assert(MakeSmallPlan({1,1,64,256,1,false,false},h).variant==SmallVariant::None);
+ assert(MakeSmallPlan({1,1,64,128,1,false,false},{24,32768+fits.ubBytes}).variant==SmallVariant::Rows);
+ assert(MakeSmallPlan({1,1,64,128,1,false,false},{24,32767+fits.ubBytes}).variant==SmallVariant::None);
  auto waves=MakeSmallPlan({32,1,1,8,1,false,false},{1,192*1024});
  assert(!UseSmallAutomatically({32,1,1,8,1,false,false},waves));
  bool conflict=false;try{SelectSmall({1,1,1,8,1,false,false},waves,{16,16},ExecutionFamily::Small);}

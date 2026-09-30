@@ -100,10 +100,10 @@ def validate_execution(plan, case):
     else:
         b, m, n, k = (case[key] for key in ('b','m','n','k'))
         dot = (not case['ta'] or m == 1) and (case['tb'] or n == 1)
-        if not (1 <= b <= 32 and 1 <= m <= 16 and 1 <= n <= 64 and 8 <= k <= 256 and k % 8 == 0
-                and m*n*k <= 32768 and case['dtype'] in ('fp16','bf16')):
+        if not (1 <= b <= (2**32-1)*8 and 1 <= m <= 8192 and 1 <= n <= 64 and 8 <= k <= 256
+                and k % 8 == 0 and case['dtype'] in ('fp16','bf16')):
             raise ValueError('small geometry outside legal bounds')
-        if plan.get('variant') != ('dot' if dot else 'rows') or (not dot and (case['tb'] or m*k > 64)):
+        if plan.get('variant') != ('dot' if dot else 'rows') or (not dot and case['tb']):
             raise ValueError('small variant/layout mismatch')
         align = lambda x: (x + 15) // 16 * 16
         a_elements = m*align(k) if dot or not case['ta'] else k*align(m)

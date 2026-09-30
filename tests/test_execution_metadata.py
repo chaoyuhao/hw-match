@@ -60,3 +60,21 @@ class ExecutionMetadataTests(unittest.TestCase):
                 with mock.patch.dict(os.environ, {'CANN_EXECUTION_FAMILY':'small'}), mock.patch.object(baseline.subprocess,'run',side_effect=legacy_run):
                     result=baseline.run_case(Path('/legacy'),self.case,root/str(metadata is None),0,1,10,False)
                     self.assertEqual(result['status'],'FAIL',result)
+
+    def test_expanded_candidates_preserve_resource_and_task_bounds(self):
+        # Byte counts independently calculated from physical rows and 32B padding.
+        for fields, used in ((dict(b=33),1536), (dict(m=128),13728),
+                             (dict(n=5,k=256,ta=True),50496),
+                             (dict(n=64,k=128),51264),
+                             (dict(m=200,n=64,tb=True),26688)):
+            case=dict(self.case,**fields)
+            plan=dict(self.plan, problem=plan_metadata.problem(case),ub_used=used,
+                      variant='dot' if case['n']==1 or case['tb'] else 'rows',
+                      tasks=(case['b']+7)//8,blocks=min(24,(case['b']+7)//8))
+            self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
+        for b,accepted in (((2**32-1)*8,True),((2**32-1)*8+1,False)):
+            case=dict(self.case,b=b)
+            plan=dict(self.plan,problem=plan_metadata.problem(case),tasks=(b+7)//8,blocks=24)
+            if accepted:self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
+            else:
+                with self.assertRaises(ValueError):plan_metadata.validate_execution(plan,case)

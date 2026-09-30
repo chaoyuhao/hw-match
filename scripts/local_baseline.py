@@ -78,10 +78,15 @@ def cases_for_suite(suite):
         # Generate axis-boundary probes, then cross dtype/layout. No official case IDs.
         shapes = {(1, 2, 8, 8), (1, 3, 5, 8)}
         base = [1, 1, 1, 8]
-        for axis, values in enumerate(((1, 7, 8, 9, 31, 32, 33), (1, 2, 3, 16, 17),
+        for axis, values in enumerate(((1, 7, 8, 9, 31, 32, 33, 191, 192, 193), (1, 2, 3, 16, 17, 31, 32, 33, 127, 128, 129),
                                        (1, 15, 16, 17, 63, 64, 65), (8, 24, 32, 40, 248, 256, 264))):
             for value in values:
                 shape = base.copy(); shape[axis] = value; shapes.add(tuple(shape))
+        for m in (1, 2, 4, 16, 32):
+            for mk in (64, 128, 256):
+                k = mk // m
+                if 8 <= k <= 256 and k % 8 == 0:
+                    shapes.add((1, m, 5, k))
         patterns = ("random", "negative", "zero", "cancellation", "near_tie")
         for dtype in ("fp16", "bf16"):
             for ta in (False, True):

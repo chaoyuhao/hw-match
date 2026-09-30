@@ -50,9 +50,9 @@ template<typename T,typename...Args> void Dispatch(Args...){++launches;}
 void Require(bool b,const std::string&s){if(!b)throw std::runtime_error(s);}
 '''
         main=r'''
-void run(uint32_t m,uint32_t n,uint32_t k,bool ta,bool tb,local_baseline::ExecutionFamily family,bool expectedSmall,bool fail=false,local_baseline::TileRequest tile={}){
+void run(uint64_t batches,uint32_t m,uint32_t n,uint32_t k,bool ta,bool tb,local_baseline::ExecutionFamily family,bool expectedSmall,bool fail=false,local_baseline::TileRequest tile={}){
  using namespace local_baseline;
- int64_t as[]={1,ta?k:m,ta?m:k},bs[]={1,tb?n:k,tb?k:n},ys[]={1};
+ int64_t as[]={static_cast<int64_t>(batches),ta?k:m,ta?m:k},bs[]={static_cast<int64_t>(batches),tb?n:k,tb?k:n},ys[]={static_cast<int64_t>(batches)};
  TensorInfo ai{as,3,1},bi{bs,3,1},yi{ys,1,0};TensorGroupInfo ag{&ai,1},bg{&bi,1},yg{&yi,1};
  uint8_t a=0,b=0,y=0;launches=allocs=tilers=0;ExecutionInfo actual;bool caught=false;
  try{auto scratch=RunKernel(&a,ag,&b,bg,&y,yg,24,(void*)1,ta,tb,tile,&actual,family);
@@ -61,19 +61,27 @@ void run(uint32_t m,uint32_t n,uint32_t k,bool ta,bool tb,local_baseline::Execut
  assert(caught==fail);
  if(fail){assert(launches==(failSync?1:0));assert(tilers==0&&allocs==0);return;}
  assert(launches==1);assert(allocs==(expectedSmall?0:2));assert(tilers==(expectedSmall?0:1));
- ProblemDesc p{1,m,n,k,1,ta,tb};
+ ProblemDesc p{batches,m,n,k,1,ta,tb};
  std::cout<<ExecutionJson(actual,p,family==ExecutionFamily::Auto?"auto":family==ExecutionFamily::Gm?"gm":"small","auto")<<'\n';
 }
 int main(){using local_baseline::ExecutionFamily;
- run(1,1,32,false,false,ExecutionFamily::Auto,true);
- run(1,5,8,true,false,ExecutionFamily::Auto,true);
- run(17,65,32,false,false,ExecutionFamily::Auto,false);
- run(3,5,8,true,true,ExecutionFamily::Auto,false);
- run(1,1,32,false,false,ExecutionFamily::Gm,false);
- run(1,1,32,false,false,ExecutionFamily::Auto,false,false,{32,64});
- run(3,5,8,true,true,ExecutionFamily::Small,false,true);
- run(1,1,32,false,false,ExecutionFamily::Small,false,true,{32,64});
- failSync=true;run(1,1,32,false,false,ExecutionFamily::Auto,true,true);
+ run(1,1,1,32,false,false,ExecutionFamily::Auto,true);
+ run(1,1,5,8,true,false,ExecutionFamily::Auto,true);
+ run(1,17,65,32,false,false,ExecutionFamily::Auto,false);
+ run(1,3,5,8,true,true,ExecutionFamily::Auto,false);
+ run(1,1,1,32,false,false,ExecutionFamily::Gm,false);
+ run(1,1,1,32,false,false,ExecutionFamily::Auto,false,false,{32,64});
+ run(1,3,5,8,true,true,ExecutionFamily::Small,false,true);
+ run(1,1,1,32,false,false,ExecutionFamily::Small,false,true,{32,64});
+ run(33,1,16,8,false,true,ExecutionFamily::Auto,true);
+ run(192,1,1,8,false,false,ExecutionFamily::Auto,true);
+ run(193,1,1,8,false,false,ExecutionFamily::Auto,false);
+ run(1,17,1,8,false,false,ExecutionFamily::Auto,true);
+ run(1,32,5,8,true,false,ExecutionFamily::Auto,true);
+ run(1,1,5,256,true,false,ExecutionFamily::Auto,true);
+ run(1,1,64,128,false,false,ExecutionFamily::Auto,true);
+ run(1,1,64,256,false,false,ExecutionFamily::Auto,false);
+ failSync=true;run(1,1,1,32,false,false,ExecutionFamily::Auto,true,true);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +92,6 @@ int main(){using local_baseline::ExecutionFamily;
             done=subprocess.run([str(binary)],capture_output=True,text=True)
             self.assertEqual(done.returncode,0,done.stderr)
             rows=[json.loads(line) for line in done.stdout.splitlines()]
-            self.assertEqual(len(rows),6)
+            self.assertEqual(len(rows),14)
             for row in rows:
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)
