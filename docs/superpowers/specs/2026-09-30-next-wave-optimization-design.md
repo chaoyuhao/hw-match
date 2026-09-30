@@ -1,6 +1,6 @@
 # S8 之后的下一波优化设计
 
-日期：2026-09-30。对照代码：R12 `b864c51`；结果归档：`fbaf2ca` / S8。本文是下一波方案与验收边界，尚未实施，不表示已获得新的性能收益。
+日期：2026-09-30。对照代码：R12 `b864c51`；结果归档：`fbaf2ca` / S8。本文保存提交前的方案与验收边界；首阶段现已实施为 [R13](../../STREAMING_FUSION.md)，尚无新性能结果。
 
 ## 目标和已有证据
 
@@ -121,4 +121,4 @@ N 有多个分片：同步 → 并行合并同一行的部分 Max → 同步 →
 - [CANN 9.0 异步 Matmul](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/programug/Ascendcopdevg/atlas_ascendc_10_10015.html)：MIX 的异步接口、workspace 和等待约定，及异步 VECIN 的 NZ 限制。
 - 本地官方 [Matmul+Abs 示例](../../../cann-learning-hub/tutorials/ascendc_operator_development_light/03_simple_operator_practice/answer/03.05/matmul_abs.asc) 提供逐块消费流程；它的固定形状、有 bias 和 MIX 1:2 配置不能直接代替上述设计。
 
-文档和主机检查不替代目标 CANN 9.0 编译与线上运行。本文保存的是候选设计，当前源码仍为 R12。
+文档和主机检查不替代目标 CANN 9.0 编译与线上运行。本文保存候选设计；R13 实施状态与限制见上方链接。

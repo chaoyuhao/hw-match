@@ -227,17 +227,17 @@ def read_matmul_plan(directory, case):
 
 def read_execution_plan(directory, case, requested_family=None):
     path = directory / "execution_plan.json"
-    if requested_family not in (None, "auto", "gm", "small"):
+    if requested_family not in (None, "auto", "gm", "small", "stream"):
         raise ValueError("invalid requested execution family")
     if not path.is_file():
-        if requested_family in ("gm", "small"):
+        if requested_family in ("gm", "small", "stream"):
             raise ValueError("forced family requires execution metadata; rebuild the runner")
         return None  # Old runner/report compatibility.
     execution = plan_metadata.validate_execution(json.loads(path.read_text()), case)
     if requested_family is not None and execution['requested_family'] != requested_family:
         raise ValueError("execution metadata differs from requested family")
     gm = read_matmul_plan(directory, case)
-    if (execution['family'] == 'small' and gm is not None) or (execution['family'] == 'gm' and gm != execution['matmul']):
+    if (execution['family'] != 'gm' and gm is not None) or (execution['family'] == 'gm' and gm != execution['matmul']):
         raise ValueError('execution and legacy Matmul metadata disagree')
     return execution
 
@@ -270,7 +270,7 @@ def run_case(binary, case, directory, device, repeat, timeout, dump_similarity, 
                 raise ValueError(f"repeat {index} differs bitwise from repeat 0")
             outputs.append(actual)
         if dump_similarity and execution is not None and not execution['similarity_available']:
-            result["similarity_validation"] = "unavailable_in_small_family"
+            result["similarity_validation"] = f"unavailable_in_{execution['family']}_family"
         elif dump_similarity:
             pitch = ((case["n"] + 15) // 16) * 16
             actual = read_f32(directory / "similarity.bin", case["b"] * case["m"] * pitch)
@@ -317,7 +317,8 @@ def main():
     report["kernel_sha256"] = hashlib.sha256(kernel.read_bytes()).hexdigest()
     report["source_sha256"] = {str(path.relative_to(kernel.parent)): hashlib.sha256(path.read_bytes()).hexdigest()
                                for path in (kernel, kernel.with_name("matmul_plan.h"), kernel.with_name("small_plan.h"),
-                                            kernel.with_name("small_vector.h"), Path(__file__),
+                                            kernel.with_name("small_vector.h"), kernel.with_name("stream_plan.h"),
+                                            kernel.with_name("stream_matmul.asc"), Path(__file__),
                                             Path(case_rules.__file__), kernel.parent / "scripts/plan_metadata.py")}
     print("LOCAL_BASELINE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     for case in cases:

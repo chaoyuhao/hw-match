@@ -2,7 +2,7 @@
 #define CANN_MATCH_SMALL_PLAN_H
 #include "matmul_plan.h"
 namespace local_baseline {
-enum class ExecutionFamily : uint32_t { Auto = 0, Gm = 1, Small = 2 };
+enum class ExecutionFamily : uint32_t { Auto = 0, Gm = 1, Small = 2, Stream = 3 };
 enum class SmallVariant : uint32_t { None = 0, Dot = 1, Rows = 2 };
 struct SmallPlan {
     SmallVariant variant = SmallVariant::None;
@@ -83,7 +83,7 @@ inline bool SelectSmall(const ProblemDesc& p, const SmallPlan& s, TileRequest ti
         if (s.variant == SmallVariant::None) throw std::runtime_error("unsupported forced small problem");
         return true;
     }
-    if (family == ExecutionFamily::Gm) return false;
+    if (family == ExecutionFamily::Gm || family == ExecutionFamily::Stream) return false;
     if (family != ExecutionFamily::Auto) throw std::runtime_error("invalid execution family");
     return !tile.m && !tile.n && UseSmallAutomatically(p, s);
 }

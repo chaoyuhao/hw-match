@@ -93,3 +93,30 @@ class ExecutionMetadataTests(unittest.TestCase):
         case=dict(case,n=64,k=128)
         plan.update(problem=plan_metadata.problem(case),dot_columns=32,ub_used=58528)
         self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
+
+    def test_stream_metadata_storage_and_missing_similarity(self):
+        case=dict(self.case,m=2,n=32,k=2)
+        stream=dict(planner_version=1,tile_m=16,tile_n=16,splits=2,row_pitch=32,
+                    c_slot_elements=32,maxima_offset=256,partial_offset=384,scratch_bytes=640,
+                    max_tiles_per_core=1,ub_used=47584,ub_budget=128*1024,
+                    inner_tile=dict(m=16,n=16,k=16))
+        plan=dict(self.plan,family='stream',variant='mix_stream',tasks=2,blocks=2,
+                  problem=plan_metadata.problem(case),stream=stream)
+        del plan['ub_used']
+        self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
+        for key in stream:
+            if isinstance(stream[key],int):
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    plan_metadata.validate_execution(dict(plan,stream=dict(stream,**{key:stream[key]+1})),case)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            def fake_run(command,**kwargs):
+                directory=Path(command[1])
+                (directory/'y-0.bin').write_bytes((directory/'golden_y.bin').read_bytes())
+                (directory/'execution_plan.json').write_text(json.dumps(plan))
+                return mock.Mock(returncode=0)
+            with mock.patch.object(baseline.subprocess,'run',side_effect=fake_run):
+                result=baseline.run_case(Path('/fake'),case,root/'stream',0,1,10,True)
+                self.assertEqual(result['status'],'PASS',result)
+                self.assertEqual(result['similarity_validation'],'unavailable_in_stream_family')
+                self.assertNotIn('matmul_precision',result)

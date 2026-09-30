@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前规则规划版按对话关联到 `1cc3cba`，用户反馈线上 15/15 通过；各轮性能与退化统一见 [迭代记录](ITERATION_LOG.md)。此前 `72abad1` 的本地 CANN 9.1.0 / 910B2C 大 M 单例已通过，算法见 [并行归约](PARALLEL_REDUCTION.md)。目前尚无当前版本地全套 NPU 回归报告，历史记录不能沿用为新版完整通过证据。
+当前源码为 R13 流式融合候选，66 项主机检查通过，未在本机做 CANN/NPU 测试，等待线上结果。当前性能对照为 R12/S8；历史通过不能替代新版验证。最新机制见 [流式融合](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。按开发决策，下面 NPU 命令仅作为可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -8,7 +8,7 @@
 
 ## 线上修改范围
 
-用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选由 `kernel.asc` 和新增的 `matmul_plan.h` 组成；本地回归后，将两个文件复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
+用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选共六个源码文件：`kernel.asc`、`matmul_plan.h`、`small_plan.h`、`small_vector.h`、`stream_plan.h`、`stream_matmul.asc`；复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
 
 原模板还明确要求：`kernel.asc` 被外部直接 include，不添加 `main()`、`#pragma once` 或 include guard，不重复定义已有的 TensorInfo/TensorGroupInfo。注释里的 `__cube__` 是示例，没有写明禁止 MIX；workspace、host 检查及调试 API 的许可不能从这段注释推断。
 
@@ -64,14 +64,16 @@ python3 scripts/local_baseline.py \
   --suite full --case tail_fp16_11
 ```
 
-## 实现
+## R12 GM 对照路径
+
+以下四步描述强制 GM 路径；当前 Auto 未命中 Small 时走 [R13 流式路径](STREAMING_FUSION.md)，不保存完整 similarity。
 
 `kernel.asc` 保留原始 `run_kernel` 签名，由原 `main.asc` 和本地 runner 共用。实际计算都在 NPU 执行，host 只校验元数据、计算 tiling、分配空间和调度：
 
 1. 一个 `__mix__(1,1)` kernel 内，由 AIV 调用 Matmul 高阶 API，通过通信框架在 AIC 执行矩阵乘。FP16/BF16 输入、FP32 输出；每个任务负责一个 batch 内的输出块，外层分块由规则生成并按实际元数据选择，详见 [规划接口](MATMUL_TILING.md)，沿完整 K 计算。四种转置存储布局直接通过地址偏移和 API 的 transpose 参数解释。
 2. 每个 AIV 等待自己负责的 Matmul 完成后，全体 AIV 执行 `SyncAll<true>()`，使归约能够读取其他核产生的中间结果。启动块数不超过入口传入的可用 Cube 核数，且设置 `__schedmode__(1)`，满足同步的调度要求。所有 AIV 都参加同步，包括不负责最终输出的核。
 3. 同一次启动内执行 Vector 归约：每个任务处理 32 行、每次读最多 256 列；WholeReduceMax 的 repeat 同时处理多行，再用向量 Max 合并列段。所有行最大值写入独占且对齐的 GM 区域后，再次进行 AIV 核间同步。
-4. 最终输出 owner 每次读取最多 1024 个行最大值，按原固定行顺序进行 FP32 补偿求和。没有浮点原子加，也没有第二次 kernel 启动。
+4. 最终输出 owner 每次读取最多 1024 个行最大值，使用 R12 向量补偿树缩减，再在 Scalar 上补偿合并。没有浮点原子加，也没有第二次 kernel 启动。
 
 系统 workspace 用 `__kfc_workspace__` 参数传递；移除旧版的纯 Cube 编译宏和 `SetSysWorkspace`。Matmul 的 UB 预算设为 128 KiB，为归约缓冲和通信留出空间。Matmul 与归约共用 TPipe，局部同步事件通过 `FetchEventID` 获取。
 
@@ -84,7 +86,7 @@ python3 scripts/local_baseline.py \
 - golden 使用量化后的实际输入值进行 FP64 Matmul，再做 Max/Sum，最终转为 FP32。
 - 数据工具仅依赖 NumPy。BF16 文件按 FP32 → BF16 最近偶数舍入编码，无需在数据生成机器安装 `ml_dtypes`；远端现有包仍可用于交叉核验。
 - 检查输出字节数严格等于 `4*B`，拒绝 NaN/Inf，所有元素满足 `abs(actual-golden) <= 1e-4 + 1e-4*abs(golden)`。
-- 默认额外比较设备中间矩阵与 FP64 Matmul，以及设备最终输出与从设备中间矩阵计算的归约结果，方便区分 Matmul 与归约问题。
+- GM 路径可额外比较设备中间矩阵与 FP64 Matmul，以及设备最终输出与从设备中间矩阵计算的归约结果，方便区分 Matmul 与归约问题。
 - runner 每次把输出填为 NaN，检查输出前后 guard、输入内容未改变、两次执行输出逐位一致。
 - `smoke` 覆盖两 dtype × 四布局、全负值、非对齐 M/N/K、batch、已知值、原模板 shape。`full` 增加 K=8192、M/N=8192、N=1、零输入、抵消和多任务复用；B=257 用例在 24 核机器上覆盖归约输出的完整分组、尾组及同核分组复用。
 - 所有报告包含 `ONLINE_EVALUATION=NOT_RUN`。报告里的 wall time 包含进程启动、文件 I/O 和诊断，不能视为 kernel 耗时或官方成绩。
@@ -113,7 +115,7 @@ bash scripts/run_local.sh --generate-only --suite full
 
 ## R8 路径记录（可选诊断，不是提交前置条件）
 
-默认自动分派。`CANN_EXECUTION_FAMILY=gm|small|auto` 仅在本地 runner 使用，线上入口不读取环境变量。强制 small 遇到不支持的尺寸/布局会明确报错；与固定 `CANN_MATMUL_TILE` 冲突也报错。固定 tile + auto 走 GM；tile sweep 自动强制 GM。
+默认先按原规则分派 Small，其余走 Stream。Stream/Small 不产生完整 similarity，报告相应标记不可回读。`CANN_EXECUTION_FAMILY=gm|small|stream|auto` 仅在本地 runner 使用，线上入口不读取环境变量。强制 small 遇到不支持的尺寸/布局会明确报错；与固定 `CANN_MATMUL_TILE` 冲突也报错。固定 tile + auto 走 GM；tile sweep 自动强制 GM。
 
 `execution_plan.json` schema 3 记录实际算法族、变体、任务/核数、输入身份和资源；GM 继续输出旧 `matmul_plan.json`。small 的 `similarity_available=false` 表示核内直接产出 y，没有中间矩阵回读；最终输出精度、重复一致性、输入不变和 guard 检查仍保留。
 

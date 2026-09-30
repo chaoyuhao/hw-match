@@ -82,7 +82,7 @@ def validate_execution(plan, case):
     if plan.get('problem') != problem(case):
         raise ValueError('execution input metadata mismatch')
     family, requested = plan.get('family'), plan.get('requested_family')
-    if family not in ('gm', 'small') or requested not in ('auto', 'gm', 'small'):
+    if family not in ('gm', 'small', 'stream') or requested not in ('auto', 'gm', 'small', 'stream'):
         raise ValueError('invalid execution family')
     if requested != 'auto' and requested != family:
         raise ValueError('requested and actual family differ')
@@ -97,6 +97,8 @@ def validate_execution(plan, case):
         gm = validate(plan.get('matmul'), case)
         if plan.get('variant') != 'mix' or any(plan[k] != gm[k] for k in ('tasks','blocks','available_cores','ub_bytes')):
             raise ValueError('GM execution disagrees with Matmul plan')
+    elif family == 'stream':
+        validate_stream(plan, case)
     else:
         b, m, n, k = (case[key] for key in ('b','m','n','k'))
         dot = (not case['ta'] or m == 1) and (case['tb'] or n == 1)
@@ -122,3 +124,49 @@ def validate_execution(plan, case):
         if plan['tasks'] != (b+7)//8 or 'matmul' in plan:
             raise ValueError('small tasks or unexpected Matmul metadata')
     return plan
+
+
+def validate_stream(plan, case):
+    """Validate emitted ownership/storage, not whether Auto chose an optimal plan."""
+    s = plan.get('stream')
+    if not isinstance(s, dict) or s.get('planner_version') != 1 or plan.get('variant') != 'mix_stream' or 'matmul' in plan:
+        raise ValueError('invalid stream plan identity')
+    fields = ('tile_m','tile_n','splits','row_pitch','c_slot_elements','maxima_offset',
+              'partial_offset','scratch_bytes','max_tiles_per_core','ub_used','ub_budget')
+    if any(type(s.get(key)) is not int or s[key] < 1 for key in fields):
+        raise ValueError('invalid stream counts/resources')
+    tm, tn = tile_token(f"{s['tile_m']}x{s['tile_n']}")
+    b, m, n, k = (case[key] for key in ('b','m','n','k'))
+    if not (b > 0 and all(1 <= x <= 8192 for x in (m,n,k)) and case['dtype'] in ('fp16','bf16')):
+        raise ValueError('invalid stream problem')
+    columns, splits = (n+tn-1)//tn, s['splits']
+    tasks = b*((m+tm-1)//tm)*splits
+    if splits > columns or plan['tasks'] != tasks or tasks > 2**64-1:
+        raise ValueError('invalid or empty stream task grid')
+    pitch = (m+31)//32*32
+    slot = min(m,tm)*tn
+    maxima = plan['blocks']*slot*4
+    partial = maxima + (b*pitch*4 if splits > 1 else 0)
+    size = partial + b*pitch*4*splits
+    expected = dict(row_pitch=pitch,c_slot_elements=slot,maxima_offset=maxima,
+                    partial_offset=partial,scratch_bytes=size,
+                    ub_used=32768+tm*4+128+(256 if splits>1 else 0)+14368,
+                    ub_budget=min(128*1024,plan['ub_bytes']-64*1024))
+    if size > 2**64-1 or any(s[key] != value for key,value in expected.items()):
+        raise ValueError('stream allocation mismatch')
+    if s['ub_used'] > 64*1024 or s['ub_used']+s['ub_budget'] > plan['ub_bytes']:
+        raise ValueError('stream UB budget exceeded')
+    blocks = plan['blocks']
+    period = splits // math.gcd(blocks,splits)
+    load = 0
+    for core in range(blocks):
+        count = (tasks-1-core)//blocks+1
+        cycles, tail = divmod(count,period)
+        weights = [columns*(((core+i*blocks)%splits)+1)//splits -
+                   columns*((core+i*blocks)%splits)//splits for i in range(min(count,period))]
+        load = max(load,cycles*sum(weights)+sum(weights[:tail]))
+    if s['max_tiles_per_core'] != load:
+        raise ValueError('stream per-core load mismatch')
+    inner = s.get('inner_tile')
+    if not isinstance(inner,dict) or set(inner) != {'m','n','k'} or any(type(v) is not int or v <= 0 for v in inner.values()):
+        raise ValueError('missing or invalid stream SDK inner tile')

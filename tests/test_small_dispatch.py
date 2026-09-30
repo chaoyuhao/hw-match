@@ -19,6 +19,7 @@ class SmallDispatchTests(unittest.TestCase):
         writers=runner[runner.index('void WritePlan('):runner.index('} // namespace')]
         prefix=r'''
 #include "small_plan.h"
+#include "stream_plan.h"
 #include <cassert>
 #include <iostream>
 #include <iomanip>
@@ -26,7 +27,7 @@ class SmallDispatchTests(unittest.TestCase):
 using half=int16_t;using bfloat16_t=uint16_t;using aclrtStream=void*;
 struct TensorInfo{const int64_t* shape;int64_t numDims;int32_t dtype;};
 struct TensorGroupInfo{const TensorInfo*tensors;int64_t numTensors;};
-static int launches,allocs,tilers;static bool failSync;
+static int launches,allocs,tilers;static bool failSync,failTiler;
 int aclrtSynchronizeStreamWithTimeout(aclrtStream,int){return failSync?1:0;}
 namespace platform_ascendc {
 struct PlatformAscendCManager{static PlatformAscendCManager*GetInstance(){static PlatformAscendCManager p;return &p;}size_t GetLibApiWorkSpaceSize(){return 32;}};
@@ -38,31 +39,33 @@ size_t Bytes(uint64_t x,uint64_t y,uint64_t z,size_t s){return PlanProduct(PlanP
 struct DeviceBuffer{void*data=nullptr;DeviceBuffer()=default;explicit DeviceBuffer(size_t){++allocs;data=(void*)16;}};
 struct FakeTiling{uint32_t baseM=16,baseN=16,baseK=16;};
 struct PreparedMatmul{MatmulPlan plan{};HardwareCaps caps{};FakeTiling tiling{};};
-struct ExecutionInfo:PreparedMatmul{bool isSmall=false;SmallPlan small{};};
+struct ExecutionInfo:PreparedMatmul{bool isSmall=false,isStream=false;SmallPlan small{};StreamPlan stream{};};
 HardwareCaps QueryCaps(uint32_t cores){return {cores,192*1024};}
-PreparedMatmul PrepareMatmul(ProblemDesc p,HardwareCaps c,TileRequest tile){++tilers;return {MakePlan(p,c,tile.m?tile:TileRequest{32,64}),c,{}};}
+PreparedMatmul PrepareMatmul(ProblemDesc p,HardwareCaps c,TileRequest tile){++tilers;if(failTiler)throw std::runtime_error("SDK rejected");return {MakePlan(p,c,tile.m?tile:TileRequest{32,64}),c,{}};}
 struct StreamCompletion{bool pending=false;StreamCompletion(aclrtStream,DeviceBuffer&,DeviceBuffer&){}void Finish(){Check(failSync,"sync");}};
 template<typename T,typename...Args> void MockSmallLaunch(uint32_t blocks,Args...){assert(blocks>0);++launches;}
 template<typename T,typename...Args> void Dispatch(Args...){++launches;}
+template<typename T,typename...Args> void DispatchStream(Args...){++launches;}
 '''
         suffix=r'''
 } // namespace local_baseline
 void Require(bool b,const std::string&s){if(!b)throw std::runtime_error(s);}
 '''
         main=r'''
-void run(uint64_t batches,uint32_t m,uint32_t n,uint32_t k,bool ta,bool tb,local_baseline::ExecutionFamily family,bool expectedSmall,bool fail=false,local_baseline::TileRequest tile={}){
+void run(uint64_t batches,uint32_t m,uint32_t n,uint32_t k,bool ta,bool tb,local_baseline::ExecutionFamily family,bool expectedSmall,bool fail=false,local_baseline::TileRequest tile={},int dtype=1){
  using namespace local_baseline;
  int64_t as[]={static_cast<int64_t>(batches),ta?k:m,ta?m:k},bs[]={static_cast<int64_t>(batches),tb?n:k,tb?k:n},ys[]={static_cast<int64_t>(batches)};
- TensorInfo ai{as,3,1},bi{bs,3,1},yi{ys,1,0};TensorGroupInfo ag{&ai,1},bg{&bi,1},yg{&yi,1};
+ TensorInfo ai{as,3,dtype},bi{bs,3,dtype},yi{ys,1,0};TensorGroupInfo ag{&ai,1},bg{&bi,1},yg{&yi,1};
  uint8_t a=0,b=0,y=0;launches=allocs=tilers=0;ExecutionInfo actual;bool caught=false;
  try{auto scratch=RunKernel(&a,ag,&b,bg,&y,yg,24,(void*)1,ta,tb,tile,&actual,family);
-     assert(!fail);assert(bool(scratch.data)==!expectedSmall);assert(actual.isSmall==expectedSmall);}
+     assert(!fail);assert(bool(scratch.data)==!expectedSmall);assert(actual.isSmall==expectedSmall);
+     assert(actual.isStream==(!expectedSmall&&(family==ExecutionFamily::Stream||(family==ExecutionFamily::Auto&&!tile.m&&!tile.n))));}
  catch(const std::runtime_error&){caught=true;assert(fail);}
  assert(caught==fail);
- if(fail){assert(launches==(failSync?1:0));assert(tilers==0&&allocs==0);return;}
+ if(fail){assert(launches==(failSync?1:0));assert(tilers==(failTiler||(!expectedSmall&&failSync)?1:0));assert(allocs==(!expectedSmall&&failSync?2:0));return;}
  assert(launches==1);assert(allocs==(expectedSmall?0:2));assert(tilers==(expectedSmall?0:1));
- ProblemDesc p{batches,m,n,k,1,ta,tb};
- std::cout<<ExecutionJson(actual,p,family==ExecutionFamily::Auto?"auto":family==ExecutionFamily::Gm?"gm":"small","auto")<<'\n';
+ ProblemDesc p{batches,m,n,k,static_cast<uint32_t>(dtype),ta,tb};
+ std::cout<<ExecutionJson(actual,p,family==ExecutionFamily::Auto?"auto":family==ExecutionFamily::Gm?"gm":family==ExecutionFamily::Stream?"stream":"small","auto")<<'\n';
 }
 int main(){using local_baseline::ExecutionFamily;
  run(1,1,1,32,false,false,ExecutionFamily::Auto,true);
@@ -83,6 +86,10 @@ int main(){using local_baseline::ExecutionFamily;
  run(1,1,5,256,true,false,ExecutionFamily::Auto,true);
  run(1,1,64,128,false,false,ExecutionFamily::Auto,true);
  run(1,1,64,256,false,false,ExecutionFamily::Auto,false);
+ for(int dtype:{1,2})for(bool ta:{false,true})for(bool tb:{false,true})
+  run(3,17,129,33,ta,tb,ExecutionFamily::Stream,false,false,{16,32},dtype);
+ failTiler=true;run(3,17,129,33,false,false,ExecutionFamily::Stream,false,true);failTiler=false;
+ failSync=true;run(3,17,129,33,false,false,ExecutionFamily::Stream,false,true);failSync=false;
  failSync=true;run(1,1,1,32,false,false,ExecutionFamily::Auto,true,true);
 }
 '''
@@ -94,7 +101,7 @@ int main(){using local_baseline::ExecutionFamily;
             done=subprocess.run([str(binary)],capture_output=True,text=True)
             self.assertEqual(done.returncode,0,done.stderr)
             rows=[json.loads(line) for line in done.stdout.splitlines()]
-            self.assertEqual(len(rows),16)
+            self.assertEqual(len(rows),24)
             self.assertTrue({16,32} <= {row.get('dot_columns') for row in rows})
             for row in rows:
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)
