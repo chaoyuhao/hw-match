@@ -1,10 +1,10 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S7 按对话关联 R11：15/15 通过；相对 S6，13 点变慢、2 点略快，点 1 +10.18%、点 5 +5.34%，未观察到批量 Dot 的性能收益。平台源码哈希未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S8 按对话关联 R12 `b864c51`：15/15 通过；点 13 从 214.07 降至 37.38 μs，快 5.73 倍，点 8–12 耗时下降 13.78%～37.65%；点 5/6 分别变慢 8.00%/7.25%。平台源码哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R12**：通用 MIX 路径最后的 Sum 改为向量补偿树，每 1024 行最多合并 8 对主值/残差，Scalar 只处理缩减后的部分结果。Matmul、行最大值、small 路径和分派规则保持 R11。相对 R11，线上只需替换 **kernel.asc**。本轮尚无线上结果，最新 S7 仍属于 R11；具体算法和验证边界见 [归约优化](docs/PARALLEL_REDUCTION.md)。
+当前源码版本 **R12**：通用 MIX 路径最后的 Sum 改为向量补偿树，每 1024 行最多合并 8 对主值/残差，Scalar 只处理缩减后的部分结果。Matmul、行最大值、small 路径和分派规则保持 R11。相对 R11，线上只需替换 **kernel.asc**。已收到 S8 全部通过和明显提速反馈，同时保留点 5/6 的退化记录；具体算法和验证边界见 [归约优化](docs/PARALLEL_REDUCTION.md)。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 

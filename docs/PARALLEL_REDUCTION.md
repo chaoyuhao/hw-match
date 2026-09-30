@@ -18,13 +18,13 @@
 
 CPU 检查运行实际 device helper，新增固定边界与强抵消输入，使用独立 FP64 或更高精度 golden，检查尾部哨兵、输出 guard、唯一 writer、输入不变、重复输出逐位相同，以及每 1024 行最多 32 次标量读取的上限。新增工作量检查已确认旧实现失败、新实现通过；它不是 NPU 性能测试。完整主机回归 `python3 -m unittest discover -s tests -v`：**62 项通过，52.867 秒**。CPU 替身不模拟异步流水、真实指令舍入或 CANN 编译。
 
-按用户要求，本轮不安排本地 NPU 验证。当前状态：`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。后续线上表与 S7 对比，重点观察点 13 和其他通用路径；没有实际分派证据时，不将点号当成 shape。
+按用户要求，本轮未安排本地 NPU 验证：`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`。现已收到 **S8：15/15 Pass，错误占比均为 0.00%**，按对话关联 R12 `b864c51`，平台源码哈希未核验。相对 S7，点 13 快 5.73 倍（214.07→37.38 μs），点 8–12 耗时下降 13.78%～37.65%，点 5/6 变慢 8.00%/7.25%；完整结果见 [迭代记录](ITERATION_LOG.md)。大幅响应支持旧版最终 Sum 的重要性，但没有实际分派或阶段计时，不将点号当成 shape。
 
 接口核对：[CANN 9.0 对齐与地址重叠约束](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0004.html)。普通 WholeReduceSum 使用树形相加，但不会自动携带本实现需要的舍入残差，见 [WholeReduceSum](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0081.html)。
 
 ## R4 历史记录：并行行最大值
 
-以下记录描述 R4，不代表 R12 已在设备上验证；其中 NPU 命令保留为可选历史入口，不作为当前迭代前置条件。
+以下记录描述 R4，其本地设备数据不作为 R12 的验证证据；R12 的线上结果单独记录在上文。NPU 命令保留为可选历史入口，不作为当前迭代前置条件。
 
 参照版本是 `d01d01b`：本地 `B=1,M=8192,N=65,K=32,FP16,transpose=00` 的 host median 为 **3448.2545 μs**，独立 profiler 的 Task Duration median 为 **3412.408 μs**。并行归约版本 `72abad1` 在相同 CANN 9.1.0 / 910B2C 环境下，该例 PASS，host median 为 **358.3775 μs**，Task Duration median 为 **324.048 μs**，分别快 **9.62× / 10.53×**；源码哈希和采样配置已核对，普通重复及 profiling 输出误差均为 0。报告位于 `build-perf/run-20260929T2225/`。
 
