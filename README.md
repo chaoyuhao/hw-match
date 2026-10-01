@@ -1,10 +1,10 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S11 按对话关联 R15 `5e27c5a`：15/15 通过；较 S10 10 点变快、5 点变慢。点 13 从 36.48 降至 27.76 μs（-23.90%），其余 14 点变化在 -2.90%～+3.53%，点 15 仍未突破。平台源码哈希未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S12 按对话关联 R16 `2d7a9b9`：15/15 通过；较 S11 4 点变快、11 点变慢，没有新增明显提速。点 13 为 27.76→28.31 μs（+1.98%），主要收益保留；点 15 为 109.31 μs（-0.22%），仍未突破。平台源码哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R16**：冻结 R15 的 SDK 接受计划后，对资源合法且能压缩有效行数据的 Rows 扩围到 Partials。算法族、分块、N 分片、核数与设备 helper 保留；74 项主机检查通过，CPU 元数据样本覆盖从 28.84% 增至 65.96%。**等待 S12 线上验证**，未做本地 CANN/NPU 测试；R15/S11 是直接对照。已有 R15 只需替换 `kernel.asc`、`joint_plan.h`。机制见 [受控覆盖](docs/STREAMING_FUSION.md#r16冻结上游计划的受控覆盖2026-10-01)。
+当前源码版本 **R16**：冻结 R15 的 SDK 接受计划后，对资源合法且能压缩有效行数据的 Rows 扩围到 Partials。算法族、分块、N 分片、核数与设备 helper 保留；74 项主机检查通过，CPU 元数据样本覆盖从 28.84% 增至 65.96%。**S12 线上 15/15 通过，但未见明显新增收益**；CPU 覆盖率不等同线上命中率。未做本地 CANN/NPU 测试；R15/S11 是直接对照。后续优先研究 Matmul→Max 的调用与传递结构，当前归档不改算子。已有 R15 只需替换 `kernel.asc`、`joint_plan.h`。机制见 [受控覆盖](docs/STREAMING_FUSION.md#r16冻结上游计划的受控覆盖2026-10-01)。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 

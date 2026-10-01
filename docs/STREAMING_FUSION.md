@@ -129,8 +129,10 @@ R14 最后阶段仍由少量 batch owner 读取整条 M 维行 Max，再执行 R
 
 只改变 reduction 及其依赖的 scratch 偏移/大小/UB；family/tile/N split/buffers/tasks/blocks/C slot/SDK tiling 全部来自原已接受计划。设备实现、向量补偿树、异步流水和跨核屏障不变。对于短 M，局部树和打包可能仍然得不偿失；本轮是有边界的覆盖实验，需通过线上反馈确定适用范围。
 
-同一 3960 组 CPU 元数据网格，Partials 1142→2612（28.84%→65.96%），新增 1470 组；所有上游计划字段与固定 R15 一致。此统计未经 SDK 接受，不代表官方输入覆盖。主机整套 74/74 通过（69.142 秒），另包含连续 SDK 拒绝下的接受顺序/结果一致性。未做本地 CANN/NPU 编译执行，等待 S12。
+同一 3960 组 CPU 元数据网格，Partials 1142→2612（28.84%→65.96%），新增 1470 组；所有上游计划字段与固定 R15 一致。此统计未经 SDK 接受，不代表官方输入覆盖。主机整套 74/74 通过（69.142 秒），另包含连续 SDK 拒绝下的接受顺序/结果一致性。未做本地 CANN/NPU 编译执行。现收到 S12：15/15 Pass，较 S11 没有新增明显提速；点 13 +1.98% 保留 R15 主要收益，点 8–12 近似持平，点 15 -0.22% 仍无突破。实际执行计划未提供，CPU 覆盖扩展不证明官方点已切换。
 
 本地 `CANN_SUM_MODE=r15` 可关闭扩围而保留 Small；auto 启用 R16，rows/partials 与 forced family/tile 继续作为旧控制。报告 `reduction_expansion` v1 保留 baseline mode/score 和实际切换；最终 `selection.score` 可能高于 baseline，因为扩围没有重新用原模型淘汰候选。线上不读取这些变量。
 
 **线上已有 R15 只替换 kernel.asc、joint_plan.h，无新增文件。** 完整九文件哈希与 S12 观察项见[迭代记录](ITERATION_LOG.md)，规则与边界见[设计](superpowers/specs/2026-10-01-controlled-reduction-design.md)。
+
+S12 后结束连续扩围试探，当前代码仍为 R16；下一轮优先研究逐块 Matmul 配置/Wait/End 与 C 的 GM 中转。完整反馈与边界见 [S12 档案](ITERATION_LOG.md#s12r16-受控扩围的线上反馈2026-10-01-收录)；本次仅更新记录，不新增设备实现，也不把候选结构成本写成已定位的线上瓶颈。
