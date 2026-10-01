@@ -1,10 +1,10 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S9 按对话关联 R13 `1dc4138`（发布 `9b386ec`）：15/15 通过；点 14 从 52.15 降至 26.09 μs，约快 2 倍；点 8–12 全部变慢，点 9 +29.61%。点 10–12 的最优参考值另有更新。平台源码哈希未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S10 按对话关联 R14 `65f7817`：15/15 通过；较 S9 13 点变快、2 点变慢。点 8/9/11 恢复 S8 水平，点 5/10/12 较 S8 进一步下降 18.98%/14.98%/12.69%，点 14 收益保留。最优参考另有变化，平台源码哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R14**：联合选择 GM/Stream/Pipeline、tile 与 N 分片，用双 GM C 槽显式重叠下一块 Cube 与上一块 Max；保留 R12 补偿求和与 Small 算法。68 项主机检查通过，未做本地 CANN/NPU 测试，等待 S10 线上结果。机制与复制清单见 [流式融合与异步流水](docs/STREAMING_FUSION.md)。R12/S8 与 R13/S9 保留作性能对照。
+当前源码版本 **R14**：联合选择 GM/Stream/Pipeline、tile 与 N 分片，用双 GM C 槽显式重叠下一块 Cube 与上一块 Max；保留 R12 补偿求和与 Small 算法。68 项主机检查通过，未做本地 CANN/NPU 测试，已收到 S10 线上 15/15 Pass。机制与复制清单见 [流式融合与异步流水](docs/STREAMING_FUSION.md)。R12/S8、R13/S9 与 R14/S10 保留作性能对照。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 

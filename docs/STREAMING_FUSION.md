@@ -95,4 +95,4 @@ Pipeline 自动候选要求每个 N shard 至少有两块，才存在块间重�
 
 完整主机回归 **68/68 通过（58.583 秒）**。真实 C++ planner 检查规则候选、独立任务枚举负载、双槽偏移、资源上界、溢出和有界 SDK 拒绝。真实设备 helper 由 CPU 操作替身执行 320 组组合，异步 C 只在 Wait 时生成，检查未完成读取、跨核槽覆盖、旧槽消费 fence、实际 pending 期间消费以及 FP64 参考；补充真实主机分派/JSON 和旧新报告验证。CPU 替身不是硬件模拟器，不能证明真实 Cube 精度、设备时序或 SDK 编译。
 
-`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。等待 S10；重点比较 S8 的 8–13 和 S9 的 14，单独跟踪 5/6 与 15，不把结构模型分数换算为线上提速。
+提交前状态为 `LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。现已收到 S10：15/15 Pass、全部错误占比 0.00%，按对话关联 R14 `65f7817`，平台源码哈希未核验；本地状态不变。较 S9 13 点变快、2 点变慢，8/9/11 基本恢复 S8，5/10/12 较 S8 进一步下降 18.98%/14.98%/12.69%，14 主要收益保留，15 仍在历史约 108–115 μs 区间。完整结果见[迭代记录](ITERATION_LOG.md)。没有实际 family/tiling 或阶段计时，不能把联合改动的全部收益归于双缓冲。
