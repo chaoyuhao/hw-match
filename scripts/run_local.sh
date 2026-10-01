@@ -9,7 +9,7 @@ for argument in "$@"; do
             echo 'Usage: bash scripts/run_local.sh [--suite smoke|full|reduction|tiling|generated|small] [--case NAME] [--device 0] [--repeat 2] [--timeout 120] [--generate-only] [--no-dump-similarity]'
             echo 'Generated suite: --case-count 64 --case-seed 20260930 --case-cores 24 (boundary hint only).'
             echo 'Local tile experiment: CANN_MATMUL_TILE=auto|MxN; M/N: 16-aligned, 16..256 (default auto).'
-            echo 'Optional reduction override: CANN_SUM_MODE=auto|rows|partials; online always uses auto.'
+            echo 'Optional reduction override: CANN_SUM_MODE=auto|r15|rows|partials; online always uses auto.'
             echo 'Optional family override: CANN_EXECUTION_FAMILY=auto|gm|small|stream|pipeline; online always uses auto.'
             exit 0 ;;
         --output-dir|--binary|--output-dir=*|--binary=*)

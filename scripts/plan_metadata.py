@@ -94,7 +94,7 @@ def validate_execution(plan, case):
     if plan['available_cores'] > 65535 or plan['blocks'] != min(plan['tasks'], plan['available_cores']):
         raise ValueError('invalid execution blocks')
     requested_sum = plan.get('requested_sum', 'auto')
-    if requested_sum not in ('auto','rows','partials') or (family == 'small' and requested_sum != 'auto'):
+    if requested_sum not in ('auto','r15','rows','partials') or (family == 'small' and requested_sum not in ('auto','r15')):
         raise ValueError('invalid or conflicting reduction request')
     selection = plan.get('selection')
     if selection is not None:
@@ -134,6 +134,7 @@ def validate_execution(plan, case):
             raise ValueError('small resource accounting mismatch')
         if plan['tasks'] != (b+7)//8 or 'matmul' in plan or 'reduction' in plan:
             raise ValueError('small tasks or unexpected Matmul metadata')
+    validate_reduction_expansion(plan, case)
     return plan
 
 
@@ -208,7 +209,7 @@ def validate_reduction(plan, case, span, base_ub, matmul_budget):
         return dict(mode='rows',bytes=row_bytes,fold_ub_bytes=0)
     if not isinstance(r,dict) or type(r.get('version')) is not int or r['version'] != 1 or r.get('mode') not in ('rows','partials'):
         raise ValueError('invalid reduction identity')
-    if requested != 'auto' and requested != r['mode']:
+    if requested not in ('auto','r15') and requested != r['mode']:
         raise ValueError('requested and actual reduction differ')
     partial = r['mode'] == 'partials'
     if partial and selection_version != 3:
@@ -225,3 +226,33 @@ def validate_reduction(plan, case, span, base_ub, matmul_budget):
     if not 0 < r['bytes'] <= 2**64-1 or r['ub_used'] > 65536 or r['ub_used']+matmul_budget > plan['ub_bytes']:
         raise ValueError('reduction resource budget exceeded')
     return r
+
+
+def validate_reduction_expansion(plan, case):
+    """Check the frozen-plan trace; model ranking itself stays in the C++ planner."""
+    selection = plan.get('selection') or {}
+    requested = plan.get('requested_sum','auto')
+    unrestricted = (plan['family'] != 'small' and plan['requested_family'] == 'auto' and
+                    selection.get('planner_version') == 3 and
+                    (plan['family'] != 'gm' or plan['matmul']['policy'] == 'auto'))
+    if 'reduction_expansion' not in plan:
+        if requested == 'r15' and unrestricted:
+            raise ValueError('missing R15 expansion control trace')
+        return  # Historical Auto reports predate the coverage experiment.
+    trace = plan['reduction_expansion']
+    if (not unrestricted or requested not in ('auto','r15') or not isinstance(trace,dict) or
+        type(trace.get('version')) is not int or trace['version'] != 1 or
+        type(trace.get('enabled')) is not bool or type(trace.get('applied')) is not bool or
+        trace['enabled'] != (requested == 'auto') or trace.get('baseline_mode') not in ('rows','partials') or
+        type(trace.get('baseline_score')) not in (int,float) or not math.isfinite(trace['baseline_score']) or trace['baseline_score'] <= 0):
+        raise ValueError('invalid reduction expansion trace')
+    reduction = plan.get('reduction')
+    if not isinstance(reduction,dict):
+        raise ValueError('expansion trace requires reduction metadata')
+    if trace['applied']:
+        if (not trace['enabled'] or trace['baseline_mode'] != 'rows' or reduction['mode'] != 'partials' or
+            reduction['segments'] < 2 or reduction['segments']*16 >= case['m'] or
+            selection['score'] < trace['baseline_score']):
+            raise ValueError('invalid or non-compressing reduction expansion')
+    elif trace['baseline_mode'] != reduction['mode'] or trace['baseline_score'] != selection['score']:
+        raise ValueError('unchanged reduction disagrees with baseline trace')

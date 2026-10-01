@@ -174,5 +174,31 @@ inline ExecutionPlan FindSupportedExecutionPlan(const ProblemDesc& p,const Hardw
     }
     throw std::runtime_error("joint execution candidates rejected by SDK");
 }
+// R16 coverage experiment: call only AFTER the R15 SDK selection succeeds.
+// Keep the accepted upstream plan; change only reduction storage and work.
+inline ExecutionPlan ExpandPartialReduction(const ProblemDesc& p,const HardwareCaps& h,
+                                            const ExecutionPlan& selected)
+{
+    if(selected.reduction.mode) return selected;
+    const bool gm=selected.family==ExecutionFamily::Gm;
+    if(!gm && selected.family!=ExecutionFamily::Stream && selected.family!=ExecutionFamily::Pipeline)
+        throw std::runtime_error("unsupported family for reduction expansion");
+    const uint32_t span=gm || selected.stream.splits>1 ? 32 : selected.stream.tileM;
+    const auto reduction=MakeReductionPlan(p,span,ReductionPolicy::Partials);
+    // Do not mistake row padding for useful compression, or add a second
+    // reduction level when there is only one segment to sum.
+    if(reduction.segments<2 || uint64_t(reduction.segments)*16>=p.m) return selected;
+    const uint64_t used=(gm?47392:selected.stream.ubBytes)+uint64_t(reduction.foldUbBytes);
+    if(used>64*1024 || used+selected.matmul.ubBudget>h.ubBytes) return selected;
+    auto result=selected;
+    result.reduction=reduction;
+    if(!gm) {
+        result.stream=SplitStreamPlan(p,h,selected.matmul,selected.stream.splits,
+                                      selected.stream.buffers,ReductionPolicy::Partials);
+        result.stream.plannerVersion=selected.stream.plannerVersion;
+    }
+    result.score=ExecutionCost(p,result);
+    return result;
+}
 } // namespace local_baseline
 #endif

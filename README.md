@@ -4,7 +4,7 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R15**：在完整行 Max 的 owner 处生成带补偿的 M 段部分和，最终阶段合并短记录；联合规划比较 Rows/Partials，保留 Small 与 R14 流水。72 项主机检查通过，未做本地 CANN/NPU 测试，已收到 **S11 线上 15/15 Pass**；点 13 有明显新增响应，多数点变化有限。机制与复制清单见 [跨阶段融合](docs/STREAMING_FUSION.md#r15max-owner-生成补偿部分和2026-10-01)。R14/S10 为直接性能对照。
+当前源码版本 **R16**：冻结 R15 的 SDK 接受计划后，对资源合法且能压缩有效行数据的 Rows 扩围到 Partials。算法族、分块、N 分片、核数与设备 helper 保留；74 项主机检查通过，CPU 元数据样本覆盖从 28.84% 增至 65.96%。**等待 S12 线上验证**，未做本地 CANN/NPU 测试；R15/S11 是直接对照。已有 R15 只需替换 `kernel.asc`、`joint_plan.h`。机制见 [受控覆盖](docs/STREAMING_FUSION.md#r16冻结上游计划的受控覆盖2026-10-01)。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 

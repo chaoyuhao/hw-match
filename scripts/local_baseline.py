@@ -227,12 +227,12 @@ def read_matmul_plan(directory, case):
 
 def read_execution_plan(directory, case, requested_family=None, requested_sum=None):
     path = directory / "execution_plan.json"
-    if requested_sum not in (None,"auto","rows","partials"):
+    if requested_sum not in (None,"auto","r15","rows","partials"):
         raise ValueError("invalid requested reduction")
     if requested_family not in (None, "auto", "gm", "small", "stream", "pipeline"):
         raise ValueError("invalid requested execution family")
     if not path.is_file():
-        if requested_family in ("gm", "small", "stream", "pipeline") or requested_sum in ("rows","partials"):
+        if requested_family in ("gm", "small", "stream", "pipeline") or requested_sum in ("r15","rows","partials"):
             raise ValueError("forced family requires execution metadata; rebuild the runner")
         return None  # Old runner/report compatibility.
     execution = plan_metadata.validate_execution(json.loads(path.read_text()), case)

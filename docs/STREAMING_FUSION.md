@@ -1,6 +1,6 @@
 # 跨阶段融合：Matmul → Max → Sum
 
-当前源码为 R15，最新机制与复制清单见文末。以下 R13/R14 段落保留为 S9/S10 的历史解释；各段“默认”指当时版本。
+当前源码为 R16，最新机制与复制清单见文末。以下 R13/R14/R15 段落保留为 S9/S10/S11 的历史解释；各段“默认”指当时版本。
 
 R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥有一个 C 临时槽，一个任务拥有 `(batch, M 行块, N 分片)`，遍历分片内所有 N 块。每块沿完整 K 做 Matmul，立即在 Vector 上更新该任务的行最大值，再复用 C 槽。最终 Sum 沿用 R12 的补偿树，Small 的算法和自动门槛不变。
 
@@ -121,3 +121,16 @@ R14 最后阶段仍由少量 batch owner 读取整条 M 维行 Max，再执行 R
 主机整套回归 **72/72 通过（68.063 秒）**。真实 helper CPU 检查覆盖 GM、Stream/Pipeline 的 S=1/S>1、尾块、多核所有权、延迟 Matmul 完成、强抵消/近零与跨段跨读取块的补偿、重复输出、producer 无 Scalar 读回及实际 UB；实际 host 分派和 metadata 检查覆盖单 launch、显式控制、失败及历史兼容。另将 640 组规则输入的新版强制 Rows 候选与固定 R14 `65f7817` 比较，全部 family/tile/排序/成本/布局/负载一致。
 
 提交前状态为 `LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。现已收到 S11：按对话关联 `5e27c5a`，15/15 Pass、全部错误占比 0.00%，点 13 较 S10 -23.90%，其余变化在 -2.90%～+3.53%，点 15 无突破；完整结果见[迭代记录](ITERATION_LOG.md)。本地测试状态不变，平台源码哈希和实际计划未核验，通过不代表所有 Partials 分支均命中。依据 [CANN 9.0 DataCopyPad](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0265.html) 的 GM byte stride / UB 32B stride 规则，本轮记录读取使用最多 128 个 32B 块。设计见 [R15 spec](superpowers/specs/2026-10-01-partial-sum-design.md)。
+
+
+## R16：冻结上游计划的受控覆盖（2026-10-01）
+
+本轮检验“R15 成本模型是否过于保守”。`PrepareExecution` 先完成原 R15 候选排序、SDK 拒绝/接受，再调用 `ExpandPartialReduction`。只作用于默认 Auto family/tile/sum 的 Rows；原 Partials、Small 和所有显式控制保持原行为。转换要求至少两个 M 段、`16*segments < M`，并满足现有归约 64KiB 和 Matmul 合计 UB 预算。没有增加 batch 或估计时间门槛，避免未校准成本继续挡住实验。
+
+只改变 reduction 及其依赖的 scratch 偏移/大小/UB；family/tile/N split/buffers/tasks/blocks/C slot/SDK tiling 全部来自原已接受计划。设备实现、向量补偿树、异步流水和跨核屏障不变。对于短 M，局部树和打包可能仍然得不偿失；本轮是有边界的覆盖实验，需通过线上反馈确定适用范围。
+
+同一 3960 组 CPU 元数据网格，Partials 1142→2612（28.84%→65.96%），新增 1470 组；所有上游计划字段与固定 R15 一致。此统计未经 SDK 接受，不代表官方输入覆盖。主机整套 74/74 通过（69.142 秒），另包含连续 SDK 拒绝下的接受顺序/结果一致性。未做本地 CANN/NPU 编译执行，等待 S12。
+
+本地 `CANN_SUM_MODE=r15` 可关闭扩围而保留 Small；auto 启用 R16，rows/partials 与 forced family/tile 继续作为旧控制。报告 `reduction_expansion` v1 保留 baseline mode/score 和实际切换；最终 `selection.score` 可能高于 baseline，因为扩围没有重新用原模型淘汰候选。线上不读取这些变量。
+
+**线上已有 R15 只替换 kernel.asc、joint_plan.h，无新增文件。** 完整九文件哈希与 S12 观察项见[迭代记录](ITERATION_LOG.md)，规则与边界见[设计](superpowers/specs/2026-10-01-controlled-reduction-design.md)。

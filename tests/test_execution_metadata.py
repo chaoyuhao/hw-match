@@ -181,3 +181,37 @@ class ExecutionMetadataTests(unittest.TestCase):
                 plan['requested_sum']='auto'
                 result=baseline.run_case(Path('/fake'),case,root/'mismatch',0,1,10,True)
                 self.assertEqual(result['status'],'FAIL',result)
+
+    def test_expansion_trace_and_r15_control_are_attributable(self):
+        case=dict(self.case,m=33,n=32,k=2)
+        stream=dict(planner_version=3,buffers=2,tile_m=16,tile_n=16,splits=2,row_pitch=64,
+                    c_slot_elements=256,maxima_offset=12288,partial_offset=12416,scratch_bytes=12928,
+                    max_tiles_per_core=1,ub_used=48096,ub_budget=128*1024,inner_tile=dict(m=16,n=16,k=16))
+        reduction=dict(version=1,mode='partials',segment_rows=32,segments=2,record_floats=16,
+                       bytes=128,fold_ub_bytes=512,ub_used=48096)
+        trace=dict(version=1,enabled=True,applied=True,baseline_mode='rows',baseline_score=90.0)
+        plan=dict(self.plan,family='pipeline',variant='mix_pipeline',requested_sum='auto',
+                  tasks=6,blocks=6,problem=plan_metadata.problem(case),stream=stream,reduction=reduction,
+                  selection=dict(planner_version=3,cost_model='joint-work-v2',score=100.25),reduction_expansion=trace)
+        del plan['ub_used']
+        self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
+        for bad in (dict(enabled=False),dict(enabled=1),dict(applied=False),dict(applied=1),dict(version=2),
+                    dict(baseline_mode='invalid'),dict(baseline_score=float('nan')),dict(baseline_score=0),dict(baseline_score=101)):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):
+                plan_metadata.validate_execution(dict(plan,reduction_expansion=dict(trace,**bad)),case)
+        for fields in (dict(requested_sum='rows'),dict(requested_family='pipeline'),
+                       dict(requested_sum='r15'),dict(reduction_expansion=None)):
+            # Missing trace is legal for historical auto reports, but not a claimed new trace.
+            with self.subTest(fields=fields),self.assertRaises(ValueError):
+                plan_metadata.validate_execution(dict(plan,**fields),case)
+        r15=dict(plan,requested_sum='r15',reduction_expansion=dict(trace,enabled=False,applied=False,baseline_mode='partials',baseline_score=100.25))
+        self.assertEqual(plan_metadata.validate_execution(r15,case),r15)
+        missing=dict(r15);del missing['reduction_expansion']
+        with self.assertRaises(ValueError):plan_metadata.validate_execution(missing,case)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'execution_plan.json').write_text(json.dumps(r15))
+            self.assertEqual(baseline.read_execution_plan(root,case,'auto','r15'),r15)
+            with self.assertRaises(ValueError):baseline.read_execution_plan(root,case,'auto','auto')
+            (root/'execution_plan.json').unlink()
+            with self.assertRaises(ValueError):baseline.read_execution_plan(root,case,'auto','r15')
