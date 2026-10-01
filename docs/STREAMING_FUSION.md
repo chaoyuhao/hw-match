@@ -11,7 +11,7 @@ R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥�
          S>1：全核同步 → 跨分片逐行 Max → 全核同步 → R12 Sum
 ```
 
-这是同步 Matmul 加有界 GM 中转。仍有 O(BMN) 个 C 元素的逻辑写入和读取，尚未实现异步流水、L1 输入复用或 C 直达 UB。可能的收益来自更小的工作集、较短的生产消费间隔，以及 S=1 时少一次全核阶段屏障；逐块 Vector 消费也可能增加 Cube 等待。没有新线上结果前不宣称提速。
+这是同步 Matmul 加有界 GM 中转。仍有 O(BMN) 个 C 元素的逻辑写入和读取，尚未实现异步流水、L1 输入复用或 C 直达 UB。可能的收益来自更小的工作集、较短的生产消费间隔，以及 S=1 时少一次全核阶段屏障；逐块 Vector 消费也可能增加 Cube 等待。2026-10-01 收到 S9：15/15 通过，点 14 约快 2 倍，点 8–12 全部变慢；本机制没有取得全面收益，详见[迭代记录](ITERATION_LOG.md)。
 
 ## 所有权与规划
 
@@ -48,7 +48,7 @@ S=1 时最终与分片 Max 为同一数组；S>1 时最后区域占 `B*S*rowPitc
 
 主机全量检查 66/66 通过。新增测试执行实际 producer、合并及 R12 Sum helper，使用检查地址/读写/队列的 CPU 替身；覆盖 160 组布局/边界/负数/零/抵消/长 K/槽复用场景，输入值均可由 FP16/BF16 精确表示，FP64 golden 独立计算。模拟 Matmul 用 float，不能证明真实 Cube 的精度、编译或异步时序。主机分派另外覆盖两 dtype×四布局、强制路径、SDK 拒绝和同步失败时不得重发 launch。
 
-`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。按既有决定，不安排额外本地 NPU 验证，下一次以 S8 为对照收集全 15 点。
+提交前状态为 `LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。现已收到用户提供的 S9 线上 15/15 Pass，按对话关联 R13；本地状态不变，平台源码哈希未核验。继续保留 S8/S9 对照，不安排额外本地 NPU 验证。
 
 若线上已有 R12，替换 **kernel.asc、small_plan.h**，新增 **stream_plan.h、stream_matmul.asc**。同时保留同目录已有的 **matmul_plan.h、small_vector.h**，共六个源码文件。其余平台原始文件不变，不需要提交包。
 
