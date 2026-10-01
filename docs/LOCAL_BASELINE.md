@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R17 S2 上游对照候选，等待 S13，尚无本轮线上结论，未做本地 CANN/NPU 测试。最新反馈仍为 R16/S12 的 15/15 Pass，不能沿用为 R17 的通过记录。已有 R16 的线上文件只需替换 `kernel.asc`。最新机制见 [流式融合与对照](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。按开发决策，下面 NPU 命令仅是可选工具，不是当前提交前置步骤。
+当前源码为 R17 S2 上游对照版，源码开关仍为 true。已收到 S13 的 15/15 Pass，点 15 -30.33% 恢复 S2 水平，但多点明显退化；全局固定旧方案不推荐作为综合默认，设 `S2_UPSTREAM_CONTROL = false` 可恢复 R16 自动方案。本次只归档，未修改开关，未做本地 CANN/NPU 测试。已有 R16 的线上文件只需替换 `kernel.asc`。最新机制见 [流式融合与对照](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。下面 NPU 命令仅是可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 

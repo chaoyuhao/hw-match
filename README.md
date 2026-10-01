@@ -1,10 +1,10 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S12 按对话关联 R16 `2d7a9b9`：15/15 通过；较 S11 4 点变快、11 点变慢，没有新增明显提速。点 13 为 27.76→28.31 μs（+1.98%），主要收益保留；点 15 为 109.31 μs（-0.22%），仍未突破。平台源码哈希未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 S13 按对话关联 R17 `6cd2e98`：15/15 通过；点 15 从 109.31 降至 76.16 μs（-30.33%），恢复 S2 水平，但其他 13 点变慢，点 8–14 明显退化。固定 GM32×64 的收益与代价均已记录，平台源码哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R17：S2 上游受控对照**。`kernel.asc` 的 `S2_UPSTREAM_CONTROL = true` 默认将通用 Auto 的上游改为 GM＋32×64，保留 Small 与 R16 选定的 Rows/Partials 模式；设为 `false` 恢复 R16。SDK 拒绝时保留原计划。74 项主机检查通过，**等待 S13，尚无性能结论**；这是检验点 15 历史退化的实验，其他点可能变慢。已有 R16 只需替换 `kernel.asc`，无新增文件。机制与边界见 [S2 上游对照](docs/STREAMING_FUSION.md#r17s2-上游受控对照2026-10-01)。
+当前源码版本 **R17：S2 上游受控对照**。`kernel.asc` 的 `S2_UPSTREAM_CONTROL = true` 默认将通用 Auto 的上游改为 GM＋32×64，保留 Small 与 R16 选定的 Rows/Partials 模式；设为 `false` 恢复 R16。SDK 拒绝时保留原计划。74 项主机检查通过，**S13 线上通过，但全局固定旧方案不适合作为综合性能默认**；该实验改善点 15 并使多点明显变慢。本次仅归档，源码开关仍为 true；设为 false 可恢复 R16 自动方案。已有 R16 只需替换 `kernel.asc`，无新增文件。机制与边界见 [S2 上游对照](docs/STREAMING_FUSION.md#r17s2-上游受控对照2026-10-01)。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
