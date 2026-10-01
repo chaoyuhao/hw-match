@@ -31,15 +31,18 @@ class ParallelReductionTests(unittest.TestCase):
             end = kernel.index("template <typename T, bool TA, bool TB>", start)
             constants = "\n".join(re.findall(r"constexpr uint32_t REDUCE_\w+ = \d+;", kernel))
             source = Path(self.tmp.name) / "test.cpp"
-            source.write_text('#include "reduction_cpu_stubs.h"\n#define __gm__\nnamespace local_baseline {\n' +
-                              constants + "\n" + kernel[start:end] + "\n}\n" +
+            source.write_text('#include "reduction_cpu_stubs.h"\n#include "reduction_plan.h"\n#define __gm__\nnamespace local_baseline {\n' +
+                              constants + "\n" + (ROOT / "partial_sum.asc").read_text() + "\n" + kernel[start:end] + "\n}\n" +
                               (ROOT / "tests/reduction_cpu_main.cpp").read_text())
             compile_result = subprocess.run(["g++", "-std=c++14", "-O2", "-ffp-contract=off", "-Wall", "-Wextra", "-Werror",
-                                             "-I", str(ROOT / "tests"), str(source), "-o", str(self.binary)],
+                                             "-I", str(ROOT / "tests"), "-I", str(ROOT), str(source), "-o", str(self.binary)],
                                             capture_output=True, text=True, timeout=60)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
         result = subprocess.run([str(self.binary), str(family)], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_gm_max_owner_writes_compensated_records(self):
+        self.run_family(4)
 
     def test_negative_rows_and_dma_vector_tails_exclude_padding(self):
         self.run_family(0)

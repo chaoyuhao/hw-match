@@ -1,12 +1,13 @@
 #ifndef CANN_MATCH_STREAM_PLAN_H
 #define CANN_MATCH_STREAM_PLAN_H
-#include "matmul_plan.h"
+#include "reduction_plan.h"
 
 namespace local_baseline {
 // POD copied to the device. Offsets and scratchBytes are bytes; C capacity is floats.
 struct StreamPlan {
     uint32_t tileM, tileN, splits, blocks, rowPitch, ubBytes;
     uint32_t buffers = 1, plannerVersion = 1;
+    ReductionPlan reduction{};
     uint64_t rowTasks, tasks, cSlotElements, maximaOffset, partialOffset, scratchBytes, maxTilesPerCore;
 };
 inline uint64_t StreamAdd(uint64_t a, uint64_t b)
@@ -15,7 +16,8 @@ inline uint64_t StreamAdd(uint64_t a, uint64_t b)
     return a + b;
 }
 inline StreamPlan SplitStreamPlan(const ProblemDesc& p, const HardwareCaps& h,
-                                  const MatmulPlan& mm, uint32_t splits, uint32_t buffers = 1)
+                                  const MatmulPlan& mm, uint32_t splits, uint32_t buffers = 1,
+                                  ReductionPolicy reduction = ReductionPolicy::Rows)
 {
     // Revalidate external geometry before divisions, multiplication or allocation.
     MakePlan(p, h, {mm.tileM, mm.tileN});
@@ -31,13 +33,14 @@ inline StreamPlan SplitStreamPlan(const ProblemDesc& p, const HardwareCaps& h,
     s.blocks = static_cast<uint32_t>(std::min<uint64_t>(s.tasks, h.cores));
     s.cSlotElements = uint64_t(std::min(p.m, s.tileM)) * s.tileN;
     s.maximaOffset = PlanProduct(uint64_t(s.blocks) * buffers, s.cSlotElements * 4);
-    const uint64_t finalBytes = PlanProduct(PlanProduct(p.batches, s.rowPitch), 4);
-    s.partialOffset = StreamAdd(s.maximaOffset, splits > 1 ? finalBytes : 0);
-    s.scratchBytes = StreamAdd(s.partialOffset, PlanProduct(finalBytes, splits));
+    s.reduction = MakeReductionPlan(p, splits == 1 ? s.tileM : 32, reduction);
+    const uint64_t shardBytes = PlanProduct(PlanProduct(p.batches, s.rowPitch), 4);
+    s.partialOffset = StreamAdd(s.maximaOffset, splits > 1 ? s.reduction.bytes : 0);
+    s.scratchBytes = StreamAdd(s.partialOffset, splits > 1 ? PlanProduct(shardBytes, splits) : s.reduction.bytes);
     if (s.scratchBytes > std::numeric_limits<size_t>::max()) throw std::runtime_error("stream exceeds address space");
     // Producer: 32x256 + tileM + 32 floats. Merge: two 32-float queues.
-    // Sum: unchanged R12 14368 bytes. Matmul retains a separate 64 KiB reserve.
-    s.ubBytes = 32 * 256 * 4 + s.tileM * 4 + 32 * 4 + (splits > 1 ? 256 : 0) + 14368;
+    // Both final sum modes use 14368 bytes. Matmul retains a separate 64 KiB reserve.
+    s.ubBytes = 32 * 256 * 4 + s.tileM * 4 + 32 * 4 + (splits > 1 ? 256 : 0) + 14368 + s.reduction.foldUbBytes;
     if (s.ubBytes > 64 * 1024 || uint64_t(s.ubBytes) + mm.ubBudget > h.ubBytes)
         throw std::runtime_error("stream UB budget exceeded");
     // Exact grid-stride load using a shard-period, independent of batch count.

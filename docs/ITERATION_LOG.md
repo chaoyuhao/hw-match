@@ -4,7 +4,7 @@
 
 最新线上反馈为 **S10：15/15 Pass，全部输出错误占比 0.00%**，按对话关联 R14 `65f7817`。相对 S9，13 点变快、2 点变慢；点 5/9/10/12 分别下降 20.79%/23.28%/24.67%/15.45%。对照 S8，点 8/9/11 基本恢复原水平，点 5/10/12 有进一步收益，点 14 的主要收益保留。11 个点的最优参考另有变化，尤其点 15 从 4.05 升至 8.31 μs，须与自身加速区分。平台源码哈希、总分、名次、实际分派及重复观测未提供。
 
-当前源码为 **R14：联合执行规划与异步双槽流水**，已收 S10 线上反馈。R12/S8、R13/S9 与 R14/S10 保留作不同机制的对照。此次更新仅归档与修订假设，不改算子或分派。
+当前源码为 **R15：Max owner 生成补偿部分和**，72 项主机检查通过，等待 S11 线上验证；本轮改动尚无设备通过或性能结论。R14/S10 为直接基线，R12/S8、R13/S9 保留作不同机制的对照。
 
 ## 记录口径
 
@@ -34,6 +34,7 @@
 | R12 2026-09-30 向量补偿 Sum | `b864c51` | 最后 M 维求和改为补偿树，1024 行压缩为最多 8 对主值/残差，再做标量补偿合并 | 62 项主机检查通过；S8 线上 15/15 通过，点 13 快 5.73 倍、8–12 明显改善；5/6 变慢，未做本地 NPU 测试 |
 | R13 2026-09-30 流式融合 | `1dc4138`，发布 `9b386ec` | 按行块拥有任务、规则生成 N 分片、每核有界 C 槽、逐块 Max；保留 R12 Sum/Small | 66 项主机检查通过；S9 线上 15/15 通过，点 14 约快 2 倍，8–12 变慢；未做本地 CANN/NPU 测试 |
 | R14 2026-10-01 联合规划与流水 | `65f7817` | 联合比较 GM/Stream/Pipeline、tile 与 N 分片；双 GM C 槽重叠下一块 Cube 与上一块 Max | 68 项主机检查通过；S10 线上 15/15 通过，13 点快、2 点慢；点 10/12 较 S8 仍快 14.98%/12.69%，未做本地 CANN/NPU 测试 |
+| R15 2026-10-01 Max→Sum 部分和 | 本轮提交，源码哈希见文末 | 完整行 Max owner 直接生成 64B 补偿记录；联合选择 Rows/Partials，缩短最终求和 | 72 项主机检查通过；未做本地 CANN/NPU 测试，等待 S11 |
 
 R3 的 `2e079f8` 和 `d01d01b` 对应相同 kernel；后者主要补充性能工具。R4 之后经历了 R5 再到 R7，**S2→S3 是跨版本累计对比，不能把全部收益归因于 R7 的评分公式**。
 
@@ -526,3 +527,30 @@ R14 提交源码 SHA256（共七个同目录文件）：
 点 1–8、13–15 共 11 点的最优参考上升；点 9–12 不变。变化原因未提供，不能据此确认平台换了设备、测试输入或计时方式，也不确认两次环境条件完全相同。上面的自身变化按相同点号对照原始耗时，未用最优参考变化解释代码收益。
 
 假设修订为 H7：R14 的组合改动支持跨阶段联合规划/流水这条方向，但阶段独立贡献仍未知。下一轮候选优先研究 **Max 完成处直接生成带补偿的 M 段部分和，再做小规模最终合并**，减少完整行 Max 的写读与少量 Sum owner 的收尾工作；S>1 必须先逐行合并 N 分片 Max。精简小规模 Cube 路径、长 Matmul 区间/输入复用仍是独立候选。该建议尚未实施，也不保证会对应点 13/15。以 R14/S10 为当前基线，同时保留 S8/S9。
+
+
+## R15：Max owner 生成补偿部分和（待 S11）
+
+以 R14/S10 为直接基线。本轮将 Max→Sum 的接口从整条行 Max 改为可选的 64B 补偿记录，覆盖 GM、Stream 和 Pipeline：完整 N Max owner 对 M 段执行向量 TwoSum 树，保留 8 个主值与 8 个补偿值；最终 batch owner 只合并记录。S>1 仍先逐行合并 N 分片 Max。没有新增 kernel launch；Small 及 R14 异步槽复用协议保留。
+
+`joint_plan.h` 同时比较 Rows/Partials 的 producer 和最终归约工作，可能连带改变 family/tile/分片。保留原 R12 Rows 算法及 R14 的 Rows 评分；新结构模型仍未经硬件时间校准。新增 `reduction_plan.h`、`partial_sum.asc`，本地 `CANN_SUM_MODE`、实际计划和源码快照同步更新；线上不读取该环境变量。机制与局限见 [R15 跨阶段融合](STREAMING_FUSION.md#r15max-owner-生成补偿部分和2026-10-01)。
+
+完整主机回归 **72/72，通过用时 68.063 秒**。独立整体代码审查未发现需修复的实质问题。新增真实 writer/finalizer 的 1152 组段长/行长/数值模式检查，扩展 GM 与 640 组 Stream/Pipeline helper 组合，并验证生产者无 Scalar 读回、记录唯一所有权、精确 UB、跨读取块补偿、分派及新旧报告。另用 640 组规则输入逐候选对比固定 R14 `65f7817`，强制 Rows 的 family/tile/排序/成本/存储/负载全部相同。CPU 替身不证明真实 CANN 编译、硬件同步或 Cube 精度。
+
+提交前状态：`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`，**没有本轮性能或线上通过结论**。下一份结果记 S11，与 S10 逐点对照；重点观察剩余 Sum 成本，同时保护点 10/12/14 已有收益。H7 逐点置信度不因实现而提高，见 [E7 预测](CASE_HYPOTHESES.md#r15--e7-提交前预测待-s11)。
+
+线上已有 R14 时替换 `kernel.asc`、`stream_plan.h`、`stream_matmul.asc`、`joint_plan.h`，新增 `reduction_plan.h`、`partial_sum.asc`；继续保留三个已有文件 `matmul_plan.h`、`small_plan.h`、`small_vector.h`。共九个同目录文件，不需要提交包。
+
+R15 提交源码 SHA256：
+
+| 文件 | SHA256 |
+| --- | --- |
+| `kernel.asc` | `d12a9a3b6ead4009d540dad301558eab31d643bb7e8565cf3d0b2b5dde3118bf` |
+| `matmul_plan.h` | `2b0fa855dd04ceb1acf328053147ff71639093243915ea0ef3ac3a494a3303e0` |
+| `small_plan.h` | `3ef6e91bd6f9f65784963a981de9c4bca07aad48f8c133161471ce8e9be85c05` |
+| `small_vector.h` | `ce6a799643a6ef0bfd8cc5e3a1fba313eb29474847a59da37c58fe059b3068cd` |
+| `stream_plan.h` | `7e2541a4e8e61cd62a1ce00ed2bbb4d7d1628683c81f224a9424f81ab1f3f7bb` |
+| `stream_matmul.asc` | `ab685de8005681f2f8e450dcb79949b9e8582f95e1adb0733ea74796ecfe584a` |
+| `joint_plan.h` | `c09dcd6ff9ad6d3b0ffaaa8af15fdd32e988aa60011e15ae893f2fe4f081cf02` |
+| `reduction_plan.h` | `a6f46b3f87c0dd132b5fb7c9e345de2ffa2aefdc7a07ace32a9e49514c814d78` |
+| `partial_sum.asc` | `ad51d2c5c3eb9d1a318178d1a9e8c9f569c5825ff4459d409d57de8b322e6cda` |

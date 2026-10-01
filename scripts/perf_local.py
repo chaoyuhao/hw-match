@@ -170,7 +170,7 @@ def sha256(path):
 def provenance(binary):
     environment = {key: os.environ.get(key) for key in (
         "ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME", "ASCEND_VISIBLE_DEVICES",
-        "ASCEND_RT_VISIBLE_DEVICES", "NPU_ARCH", "CANN_MATMUL_TILE", "CANN_EXECUTION_FAMILY")}
+        "ASCEND_RT_VISIBLE_DEVICES", "NPU_ARCH", "CANN_MATMUL_TILE", "CANN_EXECUTION_FAMILY", "CANN_SUM_MODE")}
     result = dict(git=capture(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
                   git_status=capture(["git", "-C", str(ROOT), "status", "--short"]),
                   kernel_sha256=sha256(ROOT / "kernel.asc"), environment=environment,
@@ -181,7 +181,7 @@ def provenance(binary):
                       ROOT / "scripts/local_baseline.py", ROOT / "scripts/perf_local.py",
                       ROOT / "scripts/tile_sweep.py", ROOT / "matmul_plan.h",
                       ROOT / "small_plan.h", ROOT / "small_vector.h",
-                      ROOT / "stream_plan.h", ROOT / "stream_matmul.asc", ROOT / "joint_plan.h",
+                      ROOT / "stream_plan.h", ROOT / "stream_matmul.asc", ROOT / "joint_plan.h", ROOT / "reduction_plan.h", ROOT / "partial_sum.asc",
                       ROOT / "scripts/case_rules.py", ROOT / "scripts/plan_metadata.py")})
     if binary:
         result["binary"] = str(binary)
@@ -247,7 +247,7 @@ def collect_profile(args, case, directory):
     plan = baseline.read_matmul_plan(directory, case)
     if plan is not None:
         result["matmul_plan"] = plan
-    execution = baseline.read_execution_plan(directory, case, os.environ.get("CANN_EXECUTION_FAMILY", "auto"))
+    execution = baseline.read_execution_plan(directory, case, os.environ.get("CANN_EXECUTION_FAMILY", "auto"), os.environ.get("CANN_SUM_MODE", "auto"))
     if execution is not None:
         result["execution_plan"] = execution
     return result
@@ -271,6 +271,9 @@ def write_reports(report, output):
         if execution.get("family") in ("stream", "pipeline"):
             s = execution['stream']
             tile = f"{execution['family']} {s['tile_m']}×{s['tile_n']}, N/{s['splits']}; {execution['tasks']}/{execution['blocks']}"
+        if execution.get("reduction"):
+            reduction = execution["reduction"]
+            tile += f"; sum={reduction['mode']} (M/{reduction['segment_rows']})"
         lines.append(f"| {result['case']['name']} | {result['status']} | {tile} | {stats.get('median_us', '—')} | "
                      f"{stats.get('p95_us', '—')} | {stats.get('samples', '—')} |")
     for result in report["results"]:
@@ -375,7 +378,7 @@ def main():
                   suite=args.suite, options={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                   provenance=provenance(args.binary), results=[])
     shutil.copyfile(ROOT / "kernel.asc", args.output_dir / "kernel_snapshot.asc")
-    for header in ("matmul_plan.h", "small_plan.h", "small_vector.h", "stream_plan.h", "stream_matmul.asc", "joint_plan.h"):
+    for header in ("matmul_plan.h", "small_plan.h", "small_vector.h", "stream_plan.h", "stream_matmul.asc", "joint_plan.h", "reduction_plan.h", "partial_sum.asc"):
         shutil.copyfile(ROOT / header, args.output_dir / header)
     print("LOCAL_PERFORMANCE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     if args.tile_sweep:

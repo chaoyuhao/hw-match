@@ -20,7 +20,7 @@ class StreamMatmulTests(unittest.TestCase):
         stubs=stubs.replace('template <HardEvent E> void WaitFlag(int) {}',
             'static unsigned mte2Fences=0;\ntemplate <HardEvent E> void WaitFlag(int) { if(E==HardEvent::MTE2_S) ++mte2Fences; }')
         stubs=stubs.replace('inline float readGm(float* p) {','static void (*readHook)(float*)=nullptr;\ninline float readGm(float* p) {\n    if(readHook) readHook(p);')
-        source=stubs+'\n#include "stream_plan.h"\n#define __gm__\nnamespace local_baseline {\n'+constants+'\n'+kernel[start:end]+helpers+'\n}\n'+(ROOT/'tests/stream_cpu_main.cpp').read_text()
+        source=stubs+'\n#include "stream_plan.h"\n#define __gm__\nnamespace local_baseline {\n'+constants+'\n'+(ROOT/'partial_sum.asc').read_text()+kernel[start:end]+helpers+'\n}\n'+(ROOT/'tests/stream_cpu_main.cpp').read_text()
         with tempfile.TemporaryDirectory() as directory:
             cpp=Path(directory)/'stream.cpp'; binary=Path(directory)/'stream';cpp.write_text(source)
             done=subprocess.run(['g++','-std=c++14','-O2','-ffp-contract=off','-Wall','-Wextra','-Werror','-I',str(ROOT),str(cpp),'-o',str(binary)],capture_output=True,text=True)

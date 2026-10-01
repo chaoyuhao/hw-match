@@ -86,7 +86,7 @@ struct TPipe {
     size_t bytes = 0;
     template <typename Buffer> void InitBuffer(Buffer& b, size_t n) {
         bytes += n;
-        require(bytes <= 48 * 1024, "reduction UB allocation exceeds reserved budget");
+        require(bytes <= 64 * 1024, "reduction UB allocation exceeds reserved budget");
         b.data = std::make_shared<std::vector<float>>(n / 4, std::numeric_limits<float>::quiet_NaN());
     }
     template <typename Buffer> void InitBuffer(Buffer& b, int depth, size_t n) {

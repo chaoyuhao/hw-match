@@ -5,11 +5,12 @@
 
 namespace local_baseline {
 // Host-only joint planning. Scores are abstract work, NOT cycles or microseconds.
-constexpr uint32_t EXECUTION_PLANNER_VERSION = 2;
+constexpr uint32_t EXECUTION_PLANNER_VERSION = 3;
 struct ExecutionPlan {
     ExecutionFamily family = ExecutionFamily::Gm;
     MatmulPlan matmul{};
     StreamPlan stream{};
+    ReductionPlan reduction{};
     double score = 0;
 };
 struct ExecutionCandidates { std::array<ExecutionPlan,192> plans{}; size_t count = 0; };
@@ -48,13 +49,18 @@ inline double ExecutionCost(const ProblemDesc& p, const ExecutionPlan& e)
         2.0*p.k*(rows*(p.ta?1.25:1.0)+cols*(p.tb?1.0:1.25))/256 + 64;
     const uint32_t blocks=e.family==ExecutionFamily::Gm?mm.blocks:e.stream.blocks;
     const uint64_t sumTasks=p.batches/8+(p.batches%8!=0);
-    const double sum=double(ExecutionWaves(sumTasks,blocks))*std::min<uint64_t>(8,p.batches)*
-                     (8.0*CeilDiv(p.m,64)+16);
+    // Keep the R14 Rows score unchanged; records pay for both high/low
+    // traffic and two strided DMA commands per 128-record chunk.
+    const double finalWork=e.reduction.mode ?
+        16.0*CeilDiv(e.reduction.segments*8,64)+16+8*CeilDiv(e.reduction.segments,128) :
+        8.0*CeilDiv(p.m,64)+16;
+    const double sum=double(ExecutionWaves(sumTasks,blocks))*std::min<uint64_t>(8,p.batches)*finalWork;
     constexpr double barrier=64; // fixed structural synchronization proxy
     if(e.family==ExecutionFamily::Gm) {
         const uint64_t maxTasks=PlanProduct(p.batches,CeilDiv(p.m,32));
         return double(ExecutionWaves(mm.tasks,blocks))*cube +
-            double(ExecutionWaves(maxTasks,blocks))*VectorMaxCost(std::min(p.m,32U),p.n) + 2*barrier + sum;
+            double(ExecutionWaves(maxTasks,blocks))*(VectorMaxCost(std::min(p.m,32U),p.n)+
+                (e.reduction.mode?PartialFoldCost(32):0)) + 2*barrier + sum;
     }
     const auto& s=e.stream;
     const double vector=VectorMaxCost(rows,cols);
@@ -63,10 +69,11 @@ inline double ExecutionCost(const ProblemDesc& p, const ExecutionPlan& e)
     // different cores. Pipeline pays warmup/drain once per row/shard task.
     double cost=s.buffers==2 ? double(s.maxTilesPerCore)*std::max(cube,vector)+taskWaves*std::min(cube,vector)
                             : double(s.maxTilesPerCore)*(cube+vector);
-    cost+=taskWaves*(16+double(rows)/8)+barrier+sum;
+    cost+=taskWaves*(16+double(rows)/8+(s.splits==1&&e.reduction.mode?PartialFoldCost(s.tileM):0))+barrier+sum;
     if(s.splits>1) {
         const uint64_t mergeTasks=PlanProduct(p.batches,CeilDiv(p.m,32));
-        cost+=double(ExecutionWaves(mergeTasks,s.blocks))*(s.splits*(8+double(std::min(p.m,32U))/8)+8)+barrier;
+        cost+=double(ExecutionWaves(mergeTasks,s.blocks))*(s.splits*(8+double(std::min(p.m,32U))/8)+8+
+                (e.reduction.mode?PartialFoldCost(32):0))+barrier;
     }
     return cost;
 }
@@ -76,13 +83,21 @@ inline bool ExecutionLess(const ExecutionPlan& a,const ExecutionPlan& b)
     if(a.family!=b.family) return static_cast<uint32_t>(a.family)<static_cast<uint32_t>(b.family);
     if(a.matmul.tileM!=b.matmul.tileM) return a.matmul.tileM<b.matmul.tileM;
     if(a.matmul.tileN!=b.matmul.tileN) return a.matmul.tileN<b.matmul.tileN;
-    return a.stream.splits<b.stream.splits;
+    if(a.stream.splits!=b.stream.splits) return a.stream.splits<b.stream.splits;
+    return a.reduction.mode<b.reduction.mode;
 }
 inline void AddExecutionGeometry(ExecutionCandidates& out,const ProblemDesc& p,const HardwareCaps& h,
-                                 const MatmulPlan& mm,ExecutionFamily policy)
+                                 const MatmulPlan& mm,ExecutionFamily policy,ReductionPolicy sumPolicy)
 {
     if(policy==ExecutionFamily::Auto || policy==ExecutionFamily::Gm) {
-        ExecutionPlan e; e.matmul=mm; e.score=ExecutionCost(p,e); out.plans[out.count++]=e;
+        bool found=false;ExecutionPlan best;
+        for(auto mode:{ReductionPolicy::Rows,ReductionPolicy::Partials}) {
+            if(sumPolicy!=ReductionPolicy::Auto && sumPolicy!=mode)continue;
+            ExecutionPlan e;e.matmul=mm;e.reduction=MakeReductionPlan(p,32,mode);
+            e.score=ExecutionCost(p,e);
+            if(!found || ExecutionLess(e,best)){best=e;found=true;}
+        }
+        out.plans[out.count++]=best;
     }
     const auto splits=StreamSplitCandidates(p,h,mm);
     for(uint32_t buffers=1;buffers<=2;++buffers) {
@@ -90,28 +105,32 @@ inline void AddExecutionGeometry(ExecutionCandidates& out,const ProblemDesc& p,c
         if(policy!=ExecutionFamily::Auto && policy!=family) continue;
         bool found=false; ExecutionPlan best;
         for(size_t i=0;i<splits.count;++i) {
-            // Automatic double buffering requires overlap in EVERY shard.
             if(buffers==2 && policy==ExecutionFamily::Auto && CeilDiv(p.n,mm.tileN)/splits.values[i]<2) continue;
-            ExecutionPlan e; e.family=family;e.matmul=mm;
-            e.stream=SplitStreamPlan(p,h,mm,splits.values[i],buffers);
-            e.stream.plannerVersion=EXECUTION_PLANNER_VERSION;
-            e.score=ExecutionCost(p,e);
-            if(!found || ExecutionLess(e,best)){best=e;found=true;}
+            for(auto mode:{ReductionPolicy::Rows,ReductionPolicy::Partials}) {
+                if(sumPolicy!=ReductionPolicy::Auto && sumPolicy!=mode)continue;
+                ExecutionPlan e;e.family=family;e.matmul=mm;
+                e.stream=SplitStreamPlan(p,h,mm,splits.values[i],buffers,mode);
+                e.stream.plannerVersion=EXECUTION_PLANNER_VERSION;e.reduction=e.stream.reduction;
+                e.score=ExecutionCost(p,e);
+                if(!found || ExecutionLess(e,best)){best=e;found=true;}
+            }
         }
         if(found) out.plans[out.count++]=best;
     }
 }
 inline ExecutionCandidates GenerateExecutionCandidates(const ProblemDesc& p,const HardwareCaps& h,
-                                                        TileRequest tile={},ExecutionFamily policy=ExecutionFamily::Auto)
+                                                        TileRequest tile={},ExecutionFamily policy=ExecutionFamily::Auto,
+                                                        ReductionPolicy sumPolicy=ReductionPolicy::Auto)
 {
+    ValidateReductionPolicy(sumPolicy);
     if(policy!=ExecutionFamily::Auto && policy!=ExecutionFamily::Gm &&
        policy!=ExecutionFamily::Stream && policy!=ExecutionFamily::Pipeline)
         throw std::runtime_error("invalid joint execution policy");
     ExecutionCandidates out;
-    if(tile.m || tile.n) AddExecutionGeometry(out,p,h,MakePlan(p,h,tile),policy);
+    if(tile.m || tile.n) AddExecutionGeometry(out,p,h,MakePlan(p,h,tile),policy,sumPolicy);
     else {
         const auto geometries=GenerateCandidates(p,h);
-        for(size_t i=0;i<geometries.count;++i) AddExecutionGeometry(out,p,h,geometries.plans[i],policy);
+        for(size_t i=0;i<geometries.count;++i) AddExecutionGeometry(out,p,h,geometries.plans[i],policy,sumPolicy);
     }
     std::sort(out.plans.begin(),out.plans.begin()+out.count,ExecutionLess);
     return out;
@@ -119,16 +138,24 @@ inline ExecutionCandidates GenerateExecutionCandidates(const ProblemDesc& p,cons
 // accept prepares SDK tiling only. Never launch/retry device work here.
 template<typename Accept>
 inline ExecutionPlan FindSupportedExecutionPlan(const ProblemDesc& p,const HardwareCaps& h,
-                                                TileRequest tile,ExecutionFamily policy,Accept accept)
+                                                TileRequest tile,ExecutionFamily policy,Accept accept,
+                                                ReductionPolicy sumPolicy=ReductionPolicy::Auto)
 {
+    ValidateReductionPolicy(sumPolicy);
     if(policy==ExecutionFamily::Gm || policy==ExecutionFamily::Stream ||
        (policy==ExecutionFamily::Auto && (tile.m || tile.n))) {
         ExecutionPlan e;
         e.matmul=FindSupportedPlan(p,h,tile,accept);
-        if(policy==ExecutionFamily::Stream){e.family=policy;e.stream=MakeStreamPlan(p,h,e.matmul);}
+        const auto mode=sumPolicy==ReductionPolicy::Partials?ReductionPolicy::Partials:ReductionPolicy::Rows;
+        e.reduction=MakeReductionPlan(p,32,mode);
+        if(policy==ExecutionFamily::Stream){
+            e.family=policy;const auto old=MakeStreamPlan(p,h,e.matmul);
+            e.stream=SplitStreamPlan(p,h,e.matmul,old.splits,1,mode);e.reduction=e.stream.reduction;
+            if(e.reduction.mode)e.stream.plannerVersion=EXECUTION_PLANNER_VERSION;
+        }
         e.score=ExecutionCost(p,e); return e;
     }
-    const auto candidates=GenerateExecutionCandidates(p,h,tile,policy);
+    const auto candidates=GenerateExecutionCandidates(p,h,tile,policy,sumPolicy);
     std::array<TileRequest,4> tried{};size_t count=0;
     for(size_t i=0;i<candidates.count && count<tried.size();++i) {
         const auto& e=candidates.plans[i];
@@ -142,7 +169,7 @@ inline ExecutionPlan FindSupportedExecutionPlan(const ProblemDesc& p,const Hardw
     bool triedFallback=false;
     for(size_t i=0;i<count;++i) triedFallback|=tried[i].m==32 && tried[i].n==64;
     if(!triedFallback) {
-        const auto fallback=GenerateExecutionCandidates(p,h,{32,64},policy).plans[0];
+        const auto fallback=GenerateExecutionCandidates(p,h,{32,64},policy,sumPolicy).plans[0];
         if(accept(fallback.matmul)) return fallback;
     }
     throw std::runtime_error("joint execution candidates rejected by SDK");

@@ -1,6 +1,6 @@
-# 流式 Matmul → Max：R13 同步融合与 R14 异步流水
+# 跨阶段融合：Matmul → Max → Sum
 
-当前源码为 R14，最新机制与复制清单见文末。以下 R13 段落保留为 S9 的历史解释；其中“默认”指 R13。
+当前源码为 R15，最新机制与复制清单见文末。以下 R13/R14 段落保留为 S9/S10 的历史解释；各段“默认”指当时版本。
 
 R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥有一个 C 临时槽，一个任务拥有 `(batch, M 行块, N 分片)`，遍历分片内所有 N 块。每块沿完整 K 做 Matmul，立即在 Vector 上更新该任务的行最大值，再复用 C 槽。最终 Sum 沿用 R12 的补偿树，Small 的算法和自动门槛不变。
 
@@ -96,3 +96,28 @@ Pipeline 自动候选要求每个 N shard 至少有两块，才存在块间重�
 完整主机回归 **68/68 通过（58.583 秒）**。真实 C++ planner 检查规则候选、独立任务枚举负载、双槽偏移、资源上界、溢出和有界 SDK 拒绝。真实设备 helper 由 CPU 操作替身执行 320 组组合，异步 C 只在 Wait 时生成，检查未完成读取、跨核槽覆盖、旧槽消费 fence、实际 pending 期间消费以及 FP64 参考；补充真实主机分派/JSON 和旧新报告验证。CPU 替身不是硬件模拟器，不能证明真实 Cube 精度、设备时序或 SDK 编译。
 
 提交前状态为 `LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。现已收到 S10：15/15 Pass、全部错误占比 0.00%，按对话关联 R14 `65f7817`，平台源码哈希未核验；本地状态不变。较 S9 13 点变快、2 点变慢，8/9/11 基本恢复 S8，5/10/12 较 S8 进一步下降 18.98%/14.98%/12.69%，14 主要收益保留，15 仍在历史约 108–115 μs 区间。完整结果见[迭代记录](ITERATION_LOG.md)。没有实际 family/tiling 或阶段计时，不能把联合改动的全部收益归于双缓冲。
+
+
+## R15：Max owner 生成补偿部分和（2026-10-01）
+
+R14 最后阶段仍由少量 batch owner 读取整条 M 维行 Max，再执行 R12 补偿树。R15 把树的前几层放在已持有完整行 Max 的核上：GM 每 32 行、Stream/Pipeline 无 N 分片时每 tileM 行生成一条 64B 记录，包含 8 个主值和 8 个补偿值。producer 全程使用 Vector，不读回 Scalar，也不把一段提前舍入成单个 float。有 N 分片时，仍先逐行合并所有分片的 Max，再由合并 owner 生成记录；不能对各 N 片提前求和。
+
+最终阶段仍按每组 8 batch 独占输出，用两次带 stride 的 DMA 把记录拆成连续的主值和补偿数组，再作向量 TwoSum 树和固定顺序 Neumaier 合并。每个读取块最多 128 条记录，跨块保留补偿；尾段只复制有效行，其余填零，避免将 Max 的负 sentinel 加入 Sum。原有全核屏障覆盖记录写回，R14 异步 Matmul 的 Wait/End 和槽复用 fence 保留。
+
+以 M=8192 为结构例子，旧行 Max 为每 batch 32 KiB：GM 32 行一段时记录占 16 KiB；Stream tileM=128 时为 4 KiB，最终输入块从 8 个降到 1 个。这里描述数据量与工作分配，不是耗时倍率，也不代表已知官方测试 shape。短 M、窄 tile 或已有足够 batch 并行时，额外局部树可能抵消收益，因此保留 Rows 路径供模型选择。
+
+### 规划、预算与观测
+
+`reduction_plan.h` 定义普通几何/存储 POD；`partial_sum.asc` 实现设备 writer/finalizer。联合候选加入 sum mode，比较 producer 局部树、跨 N Max 和最终 high/low 读取与求和成本。每个 geometry/family 仍只保留最低成本，最多 147 个候选；SDK 尝试次数不增加。Rows 成本保留 R14，Partials 成本是未校准的结构估计，改变归约也可能改变最终 family/tile/分片选择。
+
+局部 writer 占 `14*capacity+64` 字节，capacity 为不小于段长的 2 的幂；最终归约仍占 14368 字节。GM 归约总 UB 为 47904 字节；Stream/Pipeline 本轮最大 51936 字节，均在独立预留的 64 KiB 内。S=1 的最终区域直接保存记录；S>1 保留完整分片行 Max，额外最终区域保存合并后的记录，偏移及乘加均检查溢出。
+
+本地 runner 增加 `CANN_SUM_MODE=auto|rows|partials`，显式模式跳过 Small；与强制 Small 冲突时报错。线上使用 Auto 且不读环境变量。执行 schema 3 增加 `requested_sum/reduction`，联合模型 v3 / `joint-work-v2`，旧报告可继续读取。本地报告展示实际 sum mode、段长，快照与哈希纳入两个新文件。完整语义见 [本地对照](LOCAL_BASELINE.md#当前路径与本地对照可选诊断不是提交前置条件)。
+
+### 提交与验证
+
+线上已有 R14 时，替换 **kernel.asc、stream_plan.h、stream_matmul.asc、joint_plan.h**，新增 **reduction_plan.h、partial_sum.asc**；继续保留 **matmul_plan.h、small_plan.h、small_vector.h**。共九个文件，同目录复制即可。
+
+主机整套回归 **72/72 通过（68.063 秒）**。真实 helper CPU 检查覆盖 GM、Stream/Pipeline 的 S=1/S>1、尾块、多核所有权、延迟 Matmul 完成、强抵消/近零与跨段跨读取块的补偿、重复输出、producer 无 Scalar 读回及实际 UB；实际 host 分派和 metadata 检查覆盖单 launch、显式控制、失败及历史兼容。另将 640 组规则输入的新版强制 Rows 候选与固定 R14 `65f7817` 比较，全部 family/tile/排序/成本/布局/负载一致。
+
+`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`；等待 S11。加法分组已改变，CPU long-double 对照通过不能替代平台精度及硬件同步验证。依据 [CANN 9.0 DataCopyPad](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0265.html) 的 GM byte stride / UB 32B stride 规则，本轮记录读取使用最多 128 个 32B 块。设计见 [R15 spec](superpowers/specs/2026-10-01-partial-sum-design.md)。

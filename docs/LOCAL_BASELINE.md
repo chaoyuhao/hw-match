@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R14 联合规划/双槽流水候选，68 项主机检查通过，未在本机做 CANN/NPU 测试，现已收到 S10 线上 15/15 Pass。保留 R12/S8、R13/S9 与 R14/S10 的收益/退化对照，平台源码哈希未核验。最新机制见 [流式融合与异步流水](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。按开发决策，下面 NPU 命令仅作为可选工具，不是当前提交前置步骤。
+当前源码为 R15 补偿部分和候选，72 项主机检查通过，未在本机做 CANN/NPU 测试，等待 S11 线上验证。最新已确认的反馈仍是 R14/S10 的 15/15 Pass，不能沿用到 R15；保留 R12/S8、R13/S9 与 R14/S10 的收益/退化对照，平台源码哈希未核验。最新机制见 [流式融合与异步流水](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。按开发决策，下面 NPU 命令仅作为可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -8,7 +8,7 @@
 
 ## 线上修改范围
 
-用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选共七个源码文件：`kernel.asc`、`matmul_plan.h`、`small_plan.h`、`small_vector.h`、`stream_plan.h`、`stream_matmul.asc`、`joint_plan.h`；复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
+用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选共九个源码文件：`kernel.asc`、`matmul_plan.h`、`small_plan.h`、`small_vector.h`、`stream_plan.h`、`stream_matmul.asc`、`joint_plan.h`、`reduction_plan.h`、`partial_sum.asc`；复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
 
 原模板还明确要求：`kernel.asc` 被外部直接 include，不添加 `main()`、`#pragma once` 或 include guard，不重复定义已有的 TensorInfo/TensorGroupInfo。注释里的 `__cube__` 是示例，没有写明禁止 MIX；workspace、host 检查及调试 API 的许可不能从这段注释推断。
 
@@ -113,9 +113,11 @@ bash scripts/run_local.sh --generate-only --suite full
 - [PlatformAscendCManager](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_1039.html)
 
 
-## R8 路径记录（可选诊断，不是提交前置条件）
+## 当前路径与本地对照（可选诊断，不是提交前置条件）
 
-默认先按原规则分派 Small，其余走 Stream。Stream/Small 不产生完整 similarity，报告相应标记不可回读。`CANN_EXECUTION_FAMILY=gm|small|stream|auto` 仅在本地 runner 使用，线上入口不读取环境变量。强制 small 遇到不支持的尺寸/布局会明确报错；与固定 `CANN_MATMUL_TILE` 冲突也报错。固定 tile + auto 走 GM；tile sweep 自动强制 GM。
+默认先按原规则分派 Small，其余联合选择 GM/Stream/Pipeline、tile、N 分片和 Rows/Partials。Stream/Pipeline/Small 不产生完整 similarity，报告相应标记不可回读。`CANN_EXECUTION_FAMILY=gm|small|stream|pipeline|auto` 仅在本地 runner 使用，线上入口不读取环境变量。强制 small 遇到不支持的尺寸/布局会明确报错；与固定 `CANN_MATMUL_TILE` 冲突也报错。固定 tile + auto 走 GM；tile sweep 自动强制 GM。
+
+`CANN_SUM_MODE=auto|rows|partials` 仅用于本地求和对照。显式 rows/partials 跳过 Small，与强制 small 冲突时报错。sum=auto 时强制 gm/stream 保留旧 Rows 行为；强制 pipeline 比较两种归约。固定 tile + auto family 默认 Rows，但可显式选 partials；tile sweep 继承 sum 设置。报告 schema 3 扩展 `requested_sum`、`reduction`（段长/段数、字节数和 UB），联合模型为 v3 / `joint-work-v2`，历史无新字段的报告继续按旧 Rows 校验。源码快照包含九个提交文件。
 
 `execution_plan.json` schema 3 记录实际算法族、变体、任务/核数、输入身份和资源；GM 继续输出旧 `matmul_plan.json`。small 的 `similarity_available=false` 表示核内直接产出 y，没有中间矩阵回读；最终输出精度、重复一致性、输入不变和 guard 检查仍保留。
 

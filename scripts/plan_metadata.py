@@ -93,14 +93,19 @@ def validate_execution(plan, case):
             raise ValueError('invalid execution counts/resources')
     if plan['available_cores'] > 65535 or plan['blocks'] != min(plan['tasks'], plan['available_cores']):
         raise ValueError('invalid execution blocks')
+    requested_sum = plan.get('requested_sum', 'auto')
+    if requested_sum not in ('auto','rows','partials') or (family == 'small' and requested_sum != 'auto'):
+        raise ValueError('invalid or conflicting reduction request')
     selection = plan.get('selection')
     if selection is not None:
         if (family == 'small' or not isinstance(selection,dict) or
-            selection.get('planner_version') != 2 or selection.get('cost_model') != 'joint-work-v1' or
+            type(selection.get('planner_version')) is not int or selection['planner_version'] not in (2,3) or
+            selection.get('cost_model') != {2:'joint-work-v1',3:'joint-work-v2'}[selection['planner_version']] or
             type(selection.get('score')) not in (int,float) or not math.isfinite(selection['score']) or selection['score'] <= 0):
             raise ValueError('invalid joint selection metadata')
     if family == 'gm':
         gm = validate(plan.get('matmul'), case)
+        validate_reduction(plan,case,32,47392,gm['ub_budget'])
         if plan.get('variant') != 'mix' or any(plan[k] != gm[k] for k in ('tasks','blocks','available_cores','ub_bytes')):
             raise ValueError('GM execution disagrees with Matmul plan')
     elif family in ('stream','pipeline'):
@@ -127,7 +132,7 @@ def validate_execution(plan, case):
         limit = min(65536,plan['ub_bytes']-32768)
         if type(plan.get('ub_used')) is not int or plan['ub_used'] != used or max(used,legacy_used) > limit:
             raise ValueError('small resource accounting mismatch')
-        if plan['tasks'] != (b+7)//8 or 'matmul' in plan:
+        if plan['tasks'] != (b+7)//8 or 'matmul' in plan or 'reduction' in plan:
             raise ValueError('small tasks or unexpected Matmul metadata')
     return plan
 
@@ -136,13 +141,13 @@ def validate_stream(plan, case):
     """Validate emitted ownership/storage, not whether Auto chose an optimal plan."""
     s = plan.get('stream')
     pipeline = plan['family'] == 'pipeline'
-    if (not isinstance(s, dict) or s.get('planner_version') not in (1,2) or
+    if (not isinstance(s, dict) or s.get('planner_version') not in (1,2,3) or
         plan.get('variant') != ('mix_pipeline' if pipeline else 'mix_stream') or 'matmul' in plan):
         raise ValueError('invalid stream plan identity')
     version = s['planner_version']
     buffers = s.get('buffers', 1 if version == 1 else None)
     if (type(buffers) is not int or buffers != (2 if pipeline else 1) or
-        (pipeline and version != 2) or (version == 2 and not plan.get('selection'))):
+        (pipeline and version not in (2,3)) or (version >= 2 and not plan.get('selection'))):
         raise ValueError('stream buffering/selection mismatch')
     fields = ('tile_m','tile_n','splits','row_pitch','c_slot_elements','maxima_offset',
               'partial_offset','scratch_bytes','max_tiles_per_core','ub_used','ub_budget')
@@ -159,11 +164,17 @@ def validate_stream(plan, case):
     pitch = (m+31)//32*32
     slot = min(m,tm)*tn
     maxima = plan['blocks']*buffers*slot*4
-    partial = maxima + (b*pitch*4 if splits > 1 else 0)
-    size = partial + b*pitch*4*splits
+    base_ub = 32768+tm*4+128+(256 if splits>1 else 0)+14368
+    reduction = validate_reduction(plan,case,tm if splits==1 else 32,base_ub,s['ub_budget'])
+    if reduction['mode'] == 'partials' and version != 3:
+        raise ValueError('partial records require stream planner v3')
+    if version == 3 and plan.get('selection',{}).get('planner_version') != 3:
+        raise ValueError('stream and joint planner version mismatch')
+    partial = maxima + (reduction['bytes'] if splits > 1 else 0)
+    size = partial + (b*pitch*4*splits if splits>1 else reduction['bytes'])
     expected = dict(row_pitch=pitch,c_slot_elements=slot,maxima_offset=maxima,
                     partial_offset=partial,scratch_bytes=size,
-                    ub_used=32768+tm*4+128+(256 if splits>1 else 0)+14368,
+                    ub_used=base_ub+reduction['fold_ub_bytes'],
                     ub_budget=min(128*1024,plan['ub_bytes']-64*1024))
     if size > 2**64-1 or any(s[key] != value for key,value in expected.items()):
         raise ValueError('stream allocation mismatch')
@@ -183,3 +194,34 @@ def validate_stream(plan, case):
     inner = s.get('inner_tile')
     if not isinstance(inner,dict) or set(inner) != {'m','n','k'} or any(type(v) is not int or v <= 0 for v in inner.values()):
         raise ValueError('missing or invalid stream SDK inner tile')
+
+
+def validate_reduction(plan, case, span, base_ub, matmul_budget):
+    """Validate record ownership and resource arithmetic; never re-run the selector."""
+    r = plan.get('reduction')
+    requested = plan.get('requested_sum','auto')
+    selection_version = (plan.get('selection') or {}).get('planner_version',0)
+    row_bytes = case['b']*((case['m']+31)//32)*128
+    if r is None:
+        if 'requested_sum' in plan or selection_version == 3:
+            raise ValueError('missing reduction plan')
+        return dict(mode='rows',bytes=row_bytes,fold_ub_bytes=0)
+    if not isinstance(r,dict) or type(r.get('version')) is not int or r['version'] != 1 or r.get('mode') not in ('rows','partials'):
+        raise ValueError('invalid reduction identity')
+    if requested != 'auto' and requested != r['mode']:
+        raise ValueError('requested and actual reduction differ')
+    partial = r['mode'] == 'partials'
+    if partial and selection_version != 3:
+        raise ValueError('partial records require joint planner v3')
+    capacity = 8
+    while capacity < span: capacity *= 2
+    count = (case['m']+span-1)//span
+    extra = 14*capacity+64 if partial else 0
+    expected = dict(segment_rows=span,segments=count,record_floats=16 if partial else 0,
+                    bytes=case['b']*count*64 if partial else row_bytes,
+                    fold_ub_bytes=extra,ub_used=base_ub+extra)
+    if any(type(r.get(key)) is not int or r[key] != value for key,value in expected.items()):
+        raise ValueError('reduction geometry/storage mismatch')
+    if not 0 < r['bytes'] <= 2**64-1 or r['ub_used'] > 65536 or r['ub_used']+matmul_budget > plan['ub_bytes']:
+        raise ValueError('reduction resource budget exceeded')
+    return r

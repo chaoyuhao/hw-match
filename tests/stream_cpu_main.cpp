@@ -55,10 +55,10 @@ struct CpuMatmul {
  void End(){ready();}
 };
 template<bool TA,bool TB>
-void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t tileN,uint32_t cores,uint32_t splits,int pattern,uint32_t buffers) {
+void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t tileN,uint32_t cores,uint32_t splits,int pattern,uint32_t buffers,bool records) {
  using namespace AscendC; using namespace local_baseline;
  ProblemDesc p{B,M,N,K,1,TA,TB};HardwareCaps h{cores,192*1024};
- auto mm=MakePlan(p,h,{tileM,tileN});auto plan=SplitStreamPlan(p,h,mm,splits,buffers);
+ auto mm=MakePlan(p,h,{tileM,tileN});auto plan=SplitStreamPlan(p,h,mm,splits,buffers,records?ReductionPolicy::Partials:ReductionPolicy::Rows);
  size_t ac=size_t(B)*M*K,bc=size_t(B)*K*N,sc=plan.scratchBytes/4;
  Aligned aa(ac+32),bb(bc+32),ss(sc+32),yy(B+32);
  float* a=aa.data+16;float* b=bb.data+16;float* s=ss.data+16;float* y=yy.data+16;
@@ -94,11 +94,12 @@ void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t t
  }
  if(pattern==3)require(golden[0]==200,"bad Max-before-Sum counterexample");
  blockNum=plan.blocks;scratchStart=s;cFloats=plan.maximaOffset/4;consumed.assign(cFloats,false);lastReadFence.assign(cFloats,0);readHook=trackRead;
- bufferCount=buffers;asyncIssues=asyncWaits=overlappedReads=0;
+ bufferCount=buffers;asyncIssues=asyncWaits=overlappedReads=0;scalarReads=0;
  std::vector<TPipe> pipes(blockNum);
  for(blockIdx=0;blockIdx<blockNum;++blockIdx){CpuMatmul cpu;StreamProduce<float,TA,TB>(pipes[blockIdx],cpu,(GM_ADDR)a,(GM_ADDR)b,(GM_ADDR)s,B,M,N,K,plan);require(!cpu.pending,"task finished with pending Matmul");}
  if(splits>1)for(blockIdx=0;blockIdx<blockNum;++blockIdx)MergeStreamMaxima(pipes[blockIdx],(GM_ADDR)s,B,M,plan);
- for(blockIdx=0;blockIdx<blockNum;++blockIdx)SumRowMaxima(pipes[blockIdx],(GM_ADDR)s+plan.maximaOffset,(GM_ADDR)y,B,M,plan.rowPitch);
+ require(scalarReads==0,"producer/merge unexpectedly reads Scalar");
+ for(blockIdx=0;blockIdx<blockNum;++blockIdx)if(records)FinalizePartialSums(pipes[blockIdx],(GM_ADDR)s+plan.maximaOffset,(GM_ADDR)y,B,plan.reduction);else SumRowMaxima(pipes[blockIdx],(GM_ADDR)s+plan.maximaOffset,(GM_ADDR)y,B,M,plan.rowPitch);
  readHook=nullptr;
  require(asyncIssues==asyncWaits,"async work not drained");
  if(buffers==2){require(asyncIssues>0,"double buffer path never issues async Matmul");if((N+tileN-1)/tileN>splits)require(overlappedReads>0,"no producer/consumer overlap");}
@@ -109,14 +110,14 @@ void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t t
  for(auto& pipe:pipes)require(pipe.bytes==plan.ubBytes,"UB accounting differs from real helper allocation");
 }
 template<bool TA,bool TB>void layouts(){
- for(uint32_t buffers:{1u,2u}){
+ for(uint32_t buffers:{1u,2u})for(bool records:{false,true}){
  for(uint32_t tileM:{16u,64u,256u})for(uint32_t tileN:{16u,64u,256u})for(uint32_t edge:{0u,1u}){
   auto m=tileM+edge,n=tileN*2+edge;
-  for(uint32_t splits:{1u,2u}) check<TA,TB>(3,m,n,7,tileM,tileN,3,splits,edge,buffers);
+  for(uint32_t splits:{1u,2u}) check<TA,TB>(3,m,n,7,tileM,tileN,3,splits,edge,buffers,records);
  }
- check<TA,TB>(9,17,33,257,16,16,24,2,0,buffers);
- check<TA,TB>(1,2,32,2,16,16,24,2,3,buffers);
- check<TA,TB>(2,1027,1,1,256,16,3,1,4,buffers);
- check<TA,TB>(1,1,1,1,16,16,24,1,2,buffers);
+ check<TA,TB>(9,17,33,257,16,16,24,2,0,buffers,records);
+ check<TA,TB>(1,2,32,2,16,16,24,2,3,buffers,records);
+ check<TA,TB>(2,1027,1,1,256,16,3,1,4,buffers,records);
+ check<TA,TB>(1,1,1,1,16,16,24,1,2,buffers,records);
 }}
 int main(){layouts<false,false>();layouts<false,true>();layouts<true,false>();layouts<true,true>();}

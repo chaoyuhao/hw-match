@@ -10,11 +10,13 @@ struct Aligned {
     ~Aligned() { std::free(data); }
 };
 
-void check(uint32_t batches, uint32_t m, uint32_t n, uint32_t cores, int pattern) {
+void check(uint32_t batches, uint32_t m, uint32_t n, uint32_t cores, int pattern, bool records = false) {
     using namespace AscendC;
     const uint32_t pitch = (n + 15) / 16 * 16, rowPitch = (m + 31) / 32 * 32;
     const size_t sCount = static_cast<size_t>(batches) * m * pitch;
-    const size_t rCount = static_cast<size_t>(batches) * rowPitch;
+    const auto plan=local_baseline::MakeReductionPlan({batches,m,n,1,1,false,false},32,
+        records?local_baseline::ReductionPolicy::Partials:local_baseline::ReductionPolicy::Rows);
+    const size_t rCount=plan.bytes/4;
     Aligned s(sCount + 32), maxima(rCount + 32), output(batches + 32);
     auto* sp = s.data + 16; auto* rp = maxima.data + 16; auto* yp = output.data + 16;
     regions = {{sp, sCount, true, std::vector<unsigned>(sCount), std::vector<bool>(sCount)},
@@ -53,12 +55,13 @@ void check(uint32_t batches, uint32_t m, uint32_t n, uint32_t cores, int pattern
     std::vector<TPipe> pipes(cores);
     for (blockIdx = 0; blockIdx < cores; ++blockIdx)
         local_baseline::ComputeRowMaxima(pipes[blockIdx], reinterpret_cast<GM_ADDR>(sp),
-                                        reinterpret_cast<GM_ADDR>(rp), batches, m, n, pitch, rowPitch);
-    for (uint32_t b = 0; b < batches; ++b)
+                                        reinterpret_cast<GM_ADDR>(rp), batches, m, n, pitch, rowPitch, plan);
+    if(!records) for (uint32_t b = 0; b < batches; ++b)
         for (uint32_t row = 0; row < m; ++row)
             require(rp[static_cast<size_t>(b) * rowPitch + row] == expectedRows[static_cast<size_t>(b) * m + row], "incorrect row maximum");
     for (blockIdx = 0; blockIdx < cores; ++blockIdx)
-        local_baseline::SumRowMaxima(pipes[blockIdx], reinterpret_cast<GM_ADDR>(rp),
+      if(records) local_baseline::FinalizePartialSums(pipes[blockIdx],reinterpret_cast<GM_ADDR>(rp),reinterpret_cast<GM_ADDR>(yp),batches,plan);
+      else local_baseline::SumRowMaxima(pipes[blockIdx], reinterpret_cast<GM_ADDR>(rp),
                                     reinterpret_cast<GM_ADDR>(yp), batches, m, rowPitch);
     require(std::memcmp(expectedY.data(), yp, batches * 4) == 0, "sum differs from exact fixture golden");
     require(std::memcmp(before.data(), sp, sCount * 4) == 0, "similarity was modified");
@@ -160,6 +163,9 @@ int main(int argc, char** argv) {
         } else if (family == 2) {
             for (auto m : {1023u, 1024u, 1025u, 8192u}) check(3, m, 65, 24, 2);
             check(2, 1026, 65, 24, 3);
+        } else if(family==4) {
+            for(auto m:{1u,17u,31u,32u,33u,65u,1026u,8192u})
+              for(auto b:{1u,9u})for(int pattern=0;pattern<4;++pattern)check(b,m,65,24,pattern,true);
         } else {
             checkSum(1024, 0);
             for (auto m : {1u, 7u, 8u, 9u, 15u, 16u, 17u, 31u, 32u, 33u, 63u, 64u, 65u,

@@ -29,8 +29,8 @@ int main() {
    if(e.family==ExecutionFamily::Gm){gm=true;continue;}
    auto s=e.stream; stream|=e.family==ExecutionFamily::Stream; pipeline|=e.family==ExecutionFamily::Pipeline;
    assert(s.buffers==(e.family==ExecutionFamily::Pipeline?2u:1u));
-   assert(s.plannerVersion==2 && s.maximaOffset==uint64_t(s.blocks)*s.buffers*s.cSlotElements*4);
-   assert(s.scratchBytes==s.partialOffset+p.batches*s.splits*s.rowPitch*4);
+   assert(s.plannerVersion==3 && s.maximaOffset==uint64_t(s.blocks)*s.buffers*s.cSlotElements*4);
+   assert(s.scratchBytes==s.partialOffset+(s.splits>1?p.batches*s.splits*s.rowPitch*4:s.reduction.bytes));
    assert(s.ubBytes<=65536 && s.ubBytes+e.matmul.ubBudget<=h.ubBytes);
    std::vector<uint64_t> loads(s.blocks);
    uint32_t columns=CeilDiv(n,s.tileN);

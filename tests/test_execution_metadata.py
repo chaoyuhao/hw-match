@@ -150,3 +150,34 @@ class ExecutionMetadataTests(unittest.TestCase):
                 result=baseline.run_case(Path('/fake'),case,root/'pipeline',0,1,10,True)
                 self.assertEqual(result['status'],'PASS',result)
                 self.assertEqual(result['similarity_validation'],'unavailable_in_pipeline_family')
+
+    def test_partial_reduction_schema_storage_and_forced_policy(self):
+        case=dict(self.case,m=33,n=32,k=2)
+        stream=dict(planner_version=3,buffers=2,tile_m=16,tile_n=16,splits=2,row_pitch=64,
+                    c_slot_elements=256,maxima_offset=12288,partial_offset=12416,scratch_bytes=12928,
+                    max_tiles_per_core=1,ub_used=48096,ub_budget=128*1024,inner_tile=dict(m=16,n=16,k=16))
+        reduction=dict(version=1,mode='partials',segment_rows=32,segments=2,record_floats=16,
+                       bytes=128,fold_ub_bytes=512,ub_used=48096)
+        plan=dict(self.plan,family='pipeline',variant='mix_pipeline',requested_sum='partials',
+                  tasks=6,blocks=6,problem=plan_metadata.problem(case),stream=stream,reduction=reduction,
+                  selection=dict(planner_version=3,cost_model='joint-work-v2',score=100.25))
+        del plan['ub_used']
+        self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
+        for key in reduction:
+            if type(reduction[key]) is int:
+                with self.subTest(key=key),self.assertRaises(ValueError):
+                    plan_metadata.validate_execution(dict(plan,reduction=dict(reduction,**{key:reduction[key]+1})),case)
+        for fields in (dict(requested_sum='rows'),dict(requested_sum='unknown'),dict(reduction=None),
+                       dict(stream=dict(stream,partial_offset=12544)),dict(stream=dict(stream,planner_version=2))):
+            with self.subTest(fields=fields),self.assertRaises(ValueError):plan_metadata.validate_execution(dict(plan,**fields),case)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            def fake_run(command,**kwargs):
+                directory=Path(command[1]);(directory/'y-0.bin').write_bytes((directory/'golden_y.bin').read_bytes())
+                (directory/'execution_plan.json').write_text(json.dumps(plan));return mock.Mock(returncode=0)
+            with mock.patch.dict(os.environ,{'CANN_SUM_MODE':'partials'}),mock.patch.object(baseline.subprocess,'run',side_effect=fake_run):
+                result=baseline.run_case(Path('/fake'),case,root/'valid',0,1,10,True)
+                self.assertEqual(result['status'],'PASS',result)
+                plan['requested_sum']='auto'
+                result=baseline.run_case(Path('/fake'),case,root/'mismatch',0,1,10,True)
+                self.assertEqual(result['status'],'FAIL',result)
