@@ -4,7 +4,9 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R17：S2 上游受控对照**。`kernel.asc` 的 `S2_UPSTREAM_CONTROL = true` 默认将通用 Auto 的上游改为 GM＋32×64，保留 Small 与 R16 选定的 Rows/Partials 模式；设为 `false` 恢复 R16。SDK 拒绝时保留原计划。74 项主机检查通过，**S13 线上通过，但全局固定旧方案不适合作为综合性能默认**；该实验改善点 15 并使多点明显变慢。本次仅归档，源码开关仍为 true；设为 false 可恢复 R16 自动方案。已有 R16 只需替换 `kernel.asc`，无新增文件。机制与边界见 [S2 上游对照](docs/STREAMING_FUSION.md#r17s2-上游受控对照2026-10-01)。
+当前源码版本 **R18：连续 Matmul → Max**。默认关闭 R17 的固定 S2 对照，以 R16 自动方案为参考；通用路径尝试一次 Matmul 会话遍历 owner 的整段 N，逐个内部 C 块进入 Vector Max，结束后沿用跨片 Max 和补偿 Sum。SDK 不接受时完整保留 R16。Small 不变，仍恰好一次 kernel launch。**76 项主机检查通过，R18 尚无线上编译/精度/性能结果。** 已有 R16/R17 时，替换 **kernel.asc**，新增 **iterate_plan.h、iterate_matmul.asc**。详见 [R18 机制与边界](docs/STREAMING_FUSION.md#r18连续-matmulmax2026-10-01)。
+
+线上硬件型号仍未确认：910B2C 是本地设备；原始模板默认编译目标 `dav-2201`，允许 `NPU_ARCH` 覆盖，这不能证明线上实际卡型。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
@@ -16,7 +18,7 @@ R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-smal
 
 官方资料补充：[cann-learning-hub 调研](docs/LEARNING_HUB_REVIEW.md)；本地资料克隆目录已忽略。整体优化依据见 [实现架构审计](docs/ARCHITECTURE_AUDIT.md)，最新推进顺序以迭代记录和下一版设计为准。
 
-已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前版本需复制 **kernel.asc、matmul_plan.h、small_plan.h、small_vector.h、stream_plan.h、stream_matmul.asc、joint_plan.h、reduction_plan.h、partial_sum.asc** 到同目录，其余原始文件保持不变。
+已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前版本需复制 **kernel.asc、matmul_plan.h、small_plan.h、small_vector.h、stream_plan.h、stream_matmul.asc、joint_plan.h、reduction_plan.h、partial_sum.asc、iterate_plan.h、iterate_matmul.asc** 到同目录，其余原始文件保持不变。
 
 本地环境与测试仅用于开发调试；正确性、性能和最终得分以统一线上平台评测为准，环境小算子通过不代表赛题通过。
 

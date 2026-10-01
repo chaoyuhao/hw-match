@@ -323,7 +323,7 @@ def main():
                                for path in (kernel, kernel.with_name("matmul_plan.h"), kernel.with_name("small_plan.h"),
                                             kernel.with_name("small_vector.h"), kernel.with_name("stream_plan.h"),
                                             kernel.with_name("stream_matmul.asc"), kernel.with_name("joint_plan.h"), kernel.with_name("reduction_plan.h"),
-                                            kernel.with_name("partial_sum.asc"), Path(__file__),
+                                            kernel.with_name("partial_sum.asc"), kernel.with_name("iterate_plan.h"), kernel.with_name("iterate_matmul.asc"), Path(__file__),
                                             Path(case_rules.__file__), kernel.parent / "scripts/plan_metadata.py")}
     print("LOCAL_BASELINE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     for case in cases:

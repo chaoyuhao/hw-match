@@ -126,3 +126,8 @@ R17 只替换 `kernel.asc`：`S2_UPSTREAM_CONTROL = true` 默认使通用 Auto �
 `execution_plan.json` schema 3 记录实际算法族、变体、任务/核数、输入身份和资源；GM 继续输出旧 `matmul_plan.json`。small 的 `similarity_available=false` 表示核内直接产出 y，没有中间矩阵回读；最终输出精度、重复一致性、输入不变和 guard 检查仍保留。
 
 `--suite small` 用规则生成各维边界并交叉两 dtype/四布局，包含命中和回退，不代表线上点的真实 shape。CPU 替身只能检查地址和逻辑，不能证明 CANN 指令/流水/舍入行为。本轮按用户要求直接等待线上结果，不安排额外 NPU 采样。
+
+
+### R18 连续 Matmul→Max
+
+默认 Auto 尝试连续 Iterate/VECIN 消费；`CANN_MATMUL_MAX=r16` 可关闭它做旧自动方案对照（源码 S2 开关默认 false）。显式 family/tile/sum 和 sum=r15 保持原控制；无须为了本轮安排本地 NPU 测试。报告 `family=iterate`，没有完整 similarity；来源哈希包含新 `iterate_plan.h` 和 `iterate_matmul.asc`。线上只复制提交源码，不读取这个环境变量。资源和接口边界见 [R18](STREAMING_FUSION.md#r18连续-matmulmax2026-10-01)。

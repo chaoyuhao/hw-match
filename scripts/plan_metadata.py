@@ -82,7 +82,7 @@ def validate_execution(plan, case):
     if plan.get('problem') != problem(case):
         raise ValueError('execution input metadata mismatch')
     family, requested = plan.get('family'), plan.get('requested_family')
-    if family not in ('gm', 'small', 'stream', 'pipeline') or requested not in ('auto', 'gm', 'small', 'stream', 'pipeline'):
+    if family not in ('gm', 'small', 'stream', 'pipeline', 'iterate') or requested not in ('auto', 'gm', 'small', 'stream', 'pipeline'):
         raise ValueError('invalid execution family')
     if requested != 'auto' and requested != family:
         raise ValueError('requested and actual family differ')
@@ -108,7 +108,7 @@ def validate_execution(plan, case):
         validate_reduction(plan,case,32,47392,gm['ub_budget'])
         if plan.get('variant') != 'mix' or any(plan[k] != gm[k] for k in ('tasks','blocks','available_cores','ub_bytes')):
             raise ValueError('GM execution disagrees with Matmul plan')
-    elif family in ('stream','pipeline'):
+    elif family in ('stream','pipeline','iterate'):
         validate_stream(plan, case)
     else:
         b, m, n, k = (case[key] for key in ('b','m','n','k'))
@@ -136,6 +136,7 @@ def validate_execution(plan, case):
             raise ValueError('small tasks or unexpected Matmul metadata')
     validate_reduction_expansion(plan, case)
     validate_upstream_control(plan)
+    validate_matmul_max_fusion(plan, case)
     return plan
 
 
@@ -143,17 +144,21 @@ def validate_stream(plan, case):
     """Validate emitted ownership/storage, not whether Auto chose an optimal plan."""
     s = plan.get('stream')
     pipeline = plan['family'] == 'pipeline'
-    if (not isinstance(s, dict) or s.get('planner_version') not in (1,2,3) or
-        plan.get('variant') != ('mix_pipeline' if pipeline else 'mix_stream') or 'matmul' in plan):
+    iterative = plan['family'] == 'iterate'
+    if (not isinstance(s, dict) or s.get('planner_version') not in (1,2,3,4) or
+        plan.get('variant') != ('mix_iterate' if iterative else 'mix_pipeline' if pipeline else 'mix_stream') or 'matmul' in plan):
         raise ValueError('invalid stream plan identity')
     version = s['planner_version']
+    if (version == 4) != iterative:
+        raise ValueError('Iterate and stream version disagree')
     buffers = s.get('buffers', 1 if version == 1 else None)
     if (type(buffers) is not int or buffers != (2 if pipeline else 1) or
-        (pipeline and version not in (2,3)) or (version >= 2 and not plan.get('selection'))):
+        (pipeline and version not in (2,3)) or (version in (2,3) and not plan.get('selection'))):
         raise ValueError('stream buffering/selection mismatch')
     fields = ('tile_m','tile_n','splits','row_pitch','c_slot_elements','maxima_offset',
               'partial_offset','scratch_bytes','max_tiles_per_core','ub_used','ub_budget')
-    if any(type(s.get(key)) is not int or s[key] < 1 for key in fields):
+    zero_fields = ('c_slot_elements','maxima_offset','partial_offset') if iterative else ()
+    if any(type(s.get(key)) is not int or s[key] < (0 if key in zero_fields else 1) for key in fields):
         raise ValueError('invalid stream counts/resources')
     tm, tn = tile_token(f"{s['tile_m']}x{s['tile_n']}")
     b, m, n, k = (case[key] for key in ('b','m','n','k'))
@@ -164,11 +169,17 @@ def validate_stream(plan, case):
     if splits > columns or plan['tasks'] != tasks or tasks > 2**64-1:
         raise ValueError('invalid or empty stream task grid')
     pitch = (m+31)//32*32
-    slot = min(m,tm)*tn
+    inner = s.get('inner_tile')
+    if not isinstance(inner,dict) or set(inner) != {'m','n','k'} or any(type(v) is not int or v <= 0 for v in inner.values()):
+        raise ValueError('missing or invalid stream SDK inner tile')
+    if iterative and (inner['m']%16 or inner['n']%16 or inner['m']>tm or inner['n']>tn or inner['m']*inner['n']>8192):
+        raise ValueError('invalid Iterate C tile')
+    c_bytes = inner['m']*inner['n']*4 if iterative else 32768
+    slot = 0 if iterative else min(m,tm)*tn
     maxima = plan['blocks']*buffers*slot*4
-    base_ub = 32768+tm*4+128+(256 if splits>1 else 0)+14368
+    base_ub = c_bytes+tm*4+128+(256 if splits>1 else 0)+14368
     reduction = validate_reduction(plan,case,tm if splits==1 else 32,base_ub,s['ub_budget'])
-    if reduction['mode'] == 'partials' and version != 3:
+    if reduction['mode'] == 'partials' and version not in (3,4):
         raise ValueError('partial records require stream planner v3')
     if version == 3 and plan.get('selection',{}).get('planner_version') != 3:
         raise ValueError('stream and joint planner version mismatch')
@@ -213,7 +224,7 @@ def validate_reduction(plan, case, span, base_ub, matmul_budget):
     if requested not in ('auto','r15') and requested != r['mode']:
         raise ValueError('requested and actual reduction differ')
     partial = r['mode'] == 'partials'
-    if partial and selection_version != 3:
+    if partial and selection_version != 3 and plan['family'] != 'iterate':
         raise ValueError('partial records require joint planner v3')
     capacity = 8
     while capacity < span: capacity *= 2
@@ -291,3 +302,47 @@ def validate_upstream_control(plan):
           (trace['reference_tile_m'],trace['reference_tile_n']) == (32,64) or
           'reduction_expansion' not in plan):
         raise ValueError('SDK rejection did not retain the R16 reference plan')
+
+
+def validate_matmul_max_fusion(plan, case):
+    trace = plan.get('matmul_max_fusion')
+    iterative = plan['family'] == 'iterate'
+    if trace is None:
+        if iterative or 'iterate' in plan or 'matmul_max_fusion' in plan:
+            raise ValueError('missing fusion trace')
+        return
+    if (not isinstance(trace,dict) or type(trace.get('version')) is not int or trace['version'] != 1 or
+        trace.get('status') not in ('selected','sdk_rejected') or plan['requested_family'] != 'auto' or
+        plan.get('requested_sum') != 'auto' or 'upstream_control' in plan or plan['family'] == 'small' or
+        trace.get('reference_family') not in ('gm','stream','pipeline') or
+        trace.get('reference_reduction') != plan['reduction']['mode'] or
+        type(trace.get('reference_score')) not in (int,float) or not math.isfinite(trace['reference_score']) or trace['reference_score'] <= 0 or
+        type(trace.get('reference_splits')) is not int):
+        raise ValueError('invalid fusion trace')
+    tm, tn = tile_token(f"{trace.get('reference_tile_m')}x{trace.get('reference_tile_n')}")
+    if type(trace.get('reference_tile_m')) is not int or type(trace.get('reference_tile_n')) is not int:
+        raise ValueError('invalid reference tile types')
+    actual = plan['matmul'] if plan['family'] == 'gm' else plan['stream']
+    if actual['tile_m'] != tm or actual['tile_n'] != tn:
+        raise ValueError('fusion changed outer tile')
+    grid = (case['n']+tn-1)//tn
+    rs = trace['reference_splits']
+    if (trace['reference_family'] == 'gm' and rs != 0) or (trace['reference_family'] != 'gm' and not 1 <= rs <= grid):
+        raise ValueError('invalid reference shards')
+    if iterative != (trace['status'] == 'selected'):
+        raise ValueError('fusion status mismatch')
+    if iterative:
+        meta = plan.get('iterate')
+        splits = actual['splits']
+        rows = case['b']*((case['m']+tm-1)//tm)
+        expected_splits = rs or min(grid,(plan['available_cores']+rows-1)//rows)
+        width = max(min(case['n'],grid*(shard+1)//splits*tn)-grid*shard//splits*tn for shard in range(splits))
+        expected = dict(version=1,c_position='vecin',traverse='first_m',max_columns=width,
+                        c_tile_bytes=actual['inner_tile']['m']*actual['inner_tile']['n']*4,sessions=plan['tasks'])
+        if (not isinstance(meta,dict) or meta != expected or any(type(meta[key]) is not int for key in ('version','max_columns','c_tile_bytes','sessions')) or
+            splits != expected_splits or 'selection' in plan or 'reduction_expansion' in plan):
+            raise ValueError('invalid continuous Matmul session/resources')
+    elif ('iterate' in plan or trace['reference_family'] != plan['family'] or
+          trace['reference_score'] != plan.get('selection',{}).get('score') or
+          (plan['family'] != 'gm' and rs != actual['splits']) or 'reduction_expansion' not in plan):
+        raise ValueError('fusion rejection did not preserve reference')

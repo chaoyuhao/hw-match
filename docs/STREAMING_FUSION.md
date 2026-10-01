@@ -1,6 +1,6 @@
 # 跨阶段融合：Matmul → Max → Sum
 
-当前源码为 R17，最新机制与复制清单见文末。以下 R13/R14/R15/R16 段落保留为 S9/S10/S11/S12 的历史解释；各段“默认”指当时版本。
+当前源码为 R18，最新机制与复制清单见文末。以下 R13/R14/R15/R16 段落保留为 S9/S10/S11/S12 的历史解释；各段“默认”指当时版本。
 
 R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥有一个 C 临时槽，一个任务拥有 `(batch, M 行块, N 分片)`，遍历分片内所有 N 块。每块沿完整 K 做 Matmul，立即在 Vector 上更新该任务的行最大值，再复用 C 槽。最终 Sum 沿用 R12 的补偿树，Small 的算法和自动门槛不变。
 
@@ -152,3 +152,28 @@ S12 后结束连续扩围试探，当前代码仍为 R16；下一轮优先研究
 
 
 S13：点 15 109.31→76.16 μs（-30.33%），接近 S2 76.91 μs；点 8–14 明显退化，点 12 从 120.15 μs 增至原文 1.14 ms。支持上游组合适用性不同，不能全局固定旧方案，也未区分 family 与 tile/SDK 的各自贡献。R17 仍执行 R16 host 规划，不能归因为省掉匹配开销。当前只归档，开关仍为 true；R16/S12 和 R17/S13 保留为两份对照，下一步优先区分 GM 方式与几何选择。详见 [S13](ITERATION_LOG.md#s13r17-固定上游对照的线上反馈2026-10-01-收录) 与 [H10](CASE_HYPOTHESES.md#h10--s13-修订2026-10-01)。
+
+
+## R18：连续 Matmul→Max（2026-10-01）
+
+新入口保留 R16 自动选择作为参考，默认关闭 R17 的 S2 固定对照。Small 准入和设备计算不变；其余默认 Auto 在 SDK 接受后进入 `iterate`，显式 family/tile/sum、r15 和 S2 对照仍走原实现。
+
+```text
+每个 owner 配置整段 N 和完整 K（一次）
+  Iterate → GetTensorC 到单块 UB → 按有效列更新行 Max
+  Iterate → GetTensorC 到复用 UB → 更新同一行 Max
+  ... → End（一次）→ 片内行 Max / 补偿记录
+全核同步 → 必要时跨 N 分片 Max → 原补偿 Sum
+```
+
+原 Stream/Pipeline 的 M/N 所有权不变。GM 参考计划使用原 tileM/tileN，但把 N 划分为填满可用核数所需的最少分片，减少每个 owner 的启停和完整 C 存储。若该分工相较原 GM 不合适，可能发生性能退化，当前没有在线测时或隐藏点号分派。保留 Rows/Partials 模式，按新 owner 段长重建归约；不承诺保持旧部分和分段顺序。
+
+Host 使用 VECIN C、FIRSTM 和 `SetFixSplit`，内部 C 至多 32 KiB，实际 SDK baseM/baseN 决定 UB 分配和坐标步长；总归约 UB 至多 64 KiB，Matmul 使用单独预算。按有效 rows/cols 发出 WholeReduceMax，不初始化或读取 C 的无效 padding。每块消费后归还 VECIN queue，下一块复用遵守队列依赖；End 后沿用 AIV-only 全核屏障，仍一个 MIX launch。
+
+参考 [CANN 9.0 Iterate](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0638.html)、[GetTensorC](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0639.html)、[SetTraverse](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0685.html)，以及本地官方课程的 `matmul_abs.asc`。应用代码不再保存 C，但 SDK 底层仍可能借助 GM；这不是已验证的物理片上直达。同步 Iterate 消费也不同于此前异步双槽 Pipeline，真实收益等待线上。
+
+线上型号未知；910B2C 仅为本地设备。原模板默认 `dav-2201` 编译目标允许覆盖，不能据此认定平台卡型。新计划读取可用核数/UB，SDK 拒绝时完整恢复 R16；这种回退不能处理编译失败，也不证明所有硬件均支持该 MIX 接口。
+
+本地 `CANN_MATMUL_MAX=auto|r16` 用于可选诊断；线上不读取。新报告 `family=iterate` / `variant=mix_iterate`，stream planner v4 将 C scratch 容量/起点置零，增加实际 UB C 容量、最大会话宽度、会话数及 R16 参考。旧性能评分不冒充新路径预测。历史 schema 3 报告继续可读。
+
+**已有 R16/R17：替换 kernel.asc，新增 iterate_plan.h、iterate_matmul.asc**，其他八个依赖保留。76/76 主机检查通过；无本地 CANN/NPU、无线上的本轮结果。完整哈希和比较基线见 [R18 归档](ITERATION_LOG.md#r18连续-matmulmax2026-10-01)。

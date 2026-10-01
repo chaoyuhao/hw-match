@@ -4,7 +4,7 @@
 
 最新线上反馈为 **S13：15/15 Pass，全部输出错误占比 0.00%**，按对话关联 R17 实现 `6cd2e98`、发布 `5cf155d`。相对 S12，点 15 从 109.31 降至 76.16 μs（-30.33%，约快 1.44 倍），接近并略低于 S2 的 76.91 μs；但 13 点变慢，仅点 1/15 变快。点 8–14 明显退化，点 12 达到 1.14 ms（约为 S12 的 9.49 倍）。最优参考均与 S12 相同。平台源码哈希、实际计划、总分、名次及重复观测未提供。
 
-当前源码为 **R17：S2 上游受控对照**，开关仍为 true，现已收到 S13。实验支持点 15 对上游方案选择敏感，同时显示全局强制 GM32×64 代价很大，不推荐作为综合性能默认方案。本次只归档与分析，没有改开关或算子；R16/S12 继续作为自动方案基线，R17/S13 作为固定上游对照，未新增本地 CANN/NPU 测试。
+当前源码为 **R18：连续 Matmul→Max**。默认 `S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=true`；从 R16 自动方案准备新的连续会话，SDK 拒绝保留 R16。76 项主机检查通过，未做本地 CANN/NPU 测试，**尚无 S14**。上一段 S13 仍描述 R17 历史结果，不能作为 R18 的通过证据。
 
 ## 记录口径
 
@@ -37,6 +37,7 @@
 | R15 2026-10-01 Max→Sum 部分和 | `5e27c5a` | 完整行 Max owner 直接生成 64B 补偿记录；联合选择 Rows/Partials，缩短最终求和 | 72 项主机检查通过；S11 线上 15/15 通过，点 13 -23.90%，其余变化有限；未做本地 CANN/NPU 测试 |
 | R16 2026-10-01 受控覆盖扩展 | `2d7a9b9`，源码哈希见文末 | 冻结 R15 接受的上游计划，仅将压缩有效且资源合法的 Rows 改为 Partials | 74 项主机检查通过；CPU 样本新增 1470/3960 组覆盖；S12 线上 15/15 通过，无新增明显性能收益 |
 | R17 2026-10-01 S2 上游对照 | `6cd2e98`，源码哈希见文末 | 一个源码开关将通用 Auto 固定为 GM＋32×64；沿用 R16 归约模式，SDK 拒绝保留原计划 | 74 项主机检查通过；S13 线上 15/15 通过，点 15 -30.33%，其他 13 点变慢 |
+| R18 2026-10-01 连续 Matmul→Max | 源码哈希见文末 | 每 owner 一段完整 N 会话，SDK 内部 C 块直接接 Max；应用 scratch 不保存 C；默认关闭 S2 | 76 项主机检查通过；本地 CANN/NPU 与线上未运行，待 S14 对比 S12 |
 
 R3 的 `2e079f8` 和 `d01d01b` 对应相同 kernel；后者主要补充性能工具。R4 之后经历了 R5 再到 R7，**S2→S3 是跨版本累计对比，不能把全部收益归因于 R7 的评分公式**。
 
@@ -788,3 +789,38 @@ H10 更新见[假设记录](CASE_HYPOTHESES.md#h10--s13-修订2026-10-01)。继�
 同批输入中 `S2 活跃核数 / Auto 活跃核数 > 1.25` 为 88 组，最大为 2，严格大于 2 的为 0。并行度代理确有不同覆盖，但这不证明其中任何一组就是点 15，也不证明切换会更快；当前模型已经包含部分任务轮次因素，只看核数同样可能漏掉内部切分或增加 GM 传递成本。这里只运行真实主机 C++ 规划器，没有 SDK 接受检查、设备执行或官方输入身份。
 
 防退化设计应优先评估 SDK 返回的实际内部分块、尾块有效率与任务分布，再计入保守方案的调用次数及完整 C 存储代价；这些结构指标仍是代理，不应冒充真实延迟或最坏性能保证。需要独立检查器与可解释触发原因，而不是对同一个失准模型做第二次比较。前述 GM＋原 tile 的中间对照可作为验证候选，并非要求先完成的额外本地 NPU 测试。本次只记录讨论与 CPU 证据，未实装新的阈值，也未改 R17 的开关。
+
+
+## R18：连续 Matmul→Max（2026-10-01）
+
+用户将跨模块结构改进置于点 15 退化阈值之前，本轮实现新的 Matmul→Max 交接。先关闭 R17 的全局固定 S2，恢复 R16/S12 自动参考；S2 源码开关保留供对照。未实施防御性性能阈值。
+
+原来 Stream/Pipeline 对每个外层 N 块重新 SetOrgShape/SetSingleShape/SetTensorA/B，IterateAll 后 End。现在每个 `(batch, M 行块, N 分片)` 只配置一次，用 `Iterate<true>() + GetTensorC<true>(LocalTensor, 0, true)` 逐块消费完整 K 结果，沿 SDK 的 FIRSTM 顺序恢复局部行列坐标，更新 owner 的行 Max；整段 N 完成才 End。SDK 内部仍有迭代/交接成本，本轮不能宣称 Cube/Vector 已完全重叠。
+
+保留 R16 外层 tile 和 Rows/Partials 模式。原 Stream/Pipeline 保留 N 分片；原 GM 改为行块 owner，需要时用最少 N 分片填充核数，最多原 N 网格大小。GM 转换可能同时改变任务归属、屏障及部分和分段，不声称只隔离了搬运这一项。新路径取代原双槽 Pipeline 的执行方式，旧异步方案仍可显式选择；新同步 GetTensorC 的等待也可能抵消收益。
+
+Host 与 Device 的 C 均为 VECIN/ND/FP32。baseM/baseN 根据外层 tile 限定乘积不超过 8192 个 float，再核验实际 SDK 结果、FIRSTM 和 UB 预算。使用单块 LocalTensor；只归约真实行列，padding 未定义也不能进入 Max。应用 scratch 只保存片内行 Max/补偿记录；内部系统 workspace 保留，**不把 VECIN 输出等同于物理绕过 GM**。Matmul 配置失败、返回非法内块或资源不符均在 launch 前保留完整 R16 计划；设备错误不重发 kernel。
+
+新增 `iterate_plan.h` 负责所有权/资源，`iterate_matmul.asc` 负责设备算法。`kernel.asc` 接入准备与分派。报告显示 `family=iterate`、实际 C 块容量和会话数，R16 成本只放在 `matmul_max_fusion.reference_score`，不作为新路径的预测分数。性能工具与 baseline 来源哈希纳入全部 11 个提交文件。显式 family/tile/sum、r15 和 S2 对照继续可用；本地 `CANN_MATMUL_MAX=r16` 关闭新路径，线上不读取环境变量。
+
+用户补充校正：仅已知本地卡是 910B2C，**线上型号未知**。原始压缩包的 CMake 默认 `dav-2201`，可由 `NPU_ARCH` 覆盖；README 指定 CANN 9.0.0，未给出卡型。实现沿用已通过历史版本的 MIX 1:1 框架，运行时查询 UB 和可用核数；不能由本地机型或 SDK tiling 成功推导全硬件兼容。
+
+验证：全套主机 **76/76 通过（75.483 秒）**；新增实际 producer CPU 检查 320 组，覆盖内部多 M/N 块、完整 K、布局、尾部无效值、负数、零、强抵消、跨 N Max 后 Sum、逐核所有权、会话生命周期及实际 UB 分配。真实 Host 准备/分派和 writer 在两种 S2 配置下各校验 159 条 JSON，覆盖 fp16/bf16×四转置、SDK/配置/内块/次序拒绝及同步失败不重发。CPU float 替身不是硬件模拟器，不验证真实 Cube 数值、编译或管线执行。独立审查未发现需要修复的问题。审查后另补超过万亿 batch 的纯计划/溢出检查；针对性主机测试通过，未展开数据或 NPU 工作。
+
+状态：`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。未来 S14 主对照为 **S12/R16**；额外保留 S13/S2 的点 15 76.16/76.91 μs。逐项登记新提速与退化，不从未知命中路径倒推具体 shape 或卡型。
+
+线上已有 R16/R17 时：替换 **kernel.asc**，新增 **iterate_plan.h、iterate_matmul.asc**；保留之前八个同目录依赖文件，共 11 个。不改其他原始文件，不准备提交包。
+
+| R18 提交文件 | SHA-256 |
+| --- | --- |
+| `kernel.asc` | `9bf204b78d2a83a382c5e337f1e065d7287774091dfad97593d1f7309c3b0c81` |
+| `matmul_plan.h` | `2b0fa855dd04ceb1acf328053147ff71639093243915ea0ef3ac3a494a3303e0` |
+| `small_plan.h` | `3ef6e91bd6f9f65784963a981de9c4bca07aad48f8c133161471ce8e9be85c05` |
+| `small_vector.h` | `ce6a799643a6ef0bfd8cc5e3a1fba313eb29474847a59da37c58fe059b3068cd` |
+| `stream_plan.h` | `7e2541a4e8e61cd62a1ce00ed2bbb4d7d1628683c81f224a9424f81ab1f3f7bb` |
+| `stream_matmul.asc` | `ab685de8005681f2f8e450dcb79949b9e8582f95e1adb0733ea74796ecfe584a` |
+| `joint_plan.h` | `d199e0ed12524bc878361717e6bd358834559bc92fd90be6027148822b59309f` |
+| `reduction_plan.h` | `a6f46b3f87c0dd132b5fb7c9e345de2ffa2aefdc7a07ace32a9e49514c814d78` |
+| `partial_sum.asc` | `ad51d2c5c3eb9d1a318178d1a9e8c9f569c5825ff4459d409d57de8b322e6cda` |
+| `iterate_plan.h` | `759a7a056f58270dcbee0ca0bc012e28b6e962f365b22176a9baad4a20b57787` |
+| `iterate_matmul.asc` | `01e70e07f2fb1fc0b3acd3025ed255540b89b033f3c1b7c5d6188885dfa4b2c7` |

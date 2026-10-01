@@ -170,7 +170,7 @@ def sha256(path):
 def provenance(binary):
     environment = {key: os.environ.get(key) for key in (
         "ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME", "ASCEND_VISIBLE_DEVICES",
-        "ASCEND_RT_VISIBLE_DEVICES", "NPU_ARCH", "CANN_MATMUL_TILE", "CANN_EXECUTION_FAMILY", "CANN_SUM_MODE")}
+        "ASCEND_RT_VISIBLE_DEVICES", "NPU_ARCH", "CANN_MATMUL_TILE", "CANN_EXECUTION_FAMILY", "CANN_SUM_MODE", "CANN_MATMUL_MAX")}
     result = dict(git=capture(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
                   git_status=capture(["git", "-C", str(ROOT), "status", "--short"]),
                   kernel_sha256=sha256(ROOT / "kernel.asc"), environment=environment,
@@ -181,7 +181,7 @@ def provenance(binary):
                       ROOT / "scripts/local_baseline.py", ROOT / "scripts/perf_local.py",
                       ROOT / "scripts/tile_sweep.py", ROOT / "matmul_plan.h",
                       ROOT / "small_plan.h", ROOT / "small_vector.h",
-                      ROOT / "stream_plan.h", ROOT / "stream_matmul.asc", ROOT / "joint_plan.h", ROOT / "reduction_plan.h", ROOT / "partial_sum.asc",
+                      ROOT / "stream_plan.h", ROOT / "stream_matmul.asc", ROOT / "joint_plan.h", ROOT / "reduction_plan.h", ROOT / "partial_sum.asc", ROOT / "iterate_plan.h", ROOT / "iterate_matmul.asc",
                       ROOT / "scripts/case_rules.py", ROOT / "scripts/plan_metadata.py")})
     if binary:
         result["binary"] = str(binary)
@@ -268,7 +268,7 @@ def write_reports(report, output):
         execution = result.get("execution_plan", {})
         if execution.get("family") == "small":
             tile = f"small/{execution['variant']}; {execution['tasks']}/{execution['blocks']}"
-        if execution.get("family") in ("stream", "pipeline"):
+        if execution.get("family") in ("stream", "pipeline", "iterate"):
             s = execution['stream']
             tile = f"{execution['family']} {s['tile_m']}×{s['tile_n']}, N/{s['splits']}; {execution['tasks']}/{execution['blocks']}"
         if execution.get("reduction"):
@@ -278,6 +278,8 @@ def write_reports(report, output):
             tile += "; expanded rows→partials"
         if execution.get("upstream_control"):
             tile += "; S2 upstream=" + execution["upstream_control"]["status"]
+        if execution.get("matmul_max_fusion"):
+            tile += "; Matmul→Max=" + execution["matmul_max_fusion"]["status"]
         lines.append(f"| {result['case']['name']} | {result['status']} | {tile} | {stats.get('median_us', '—')} | "
                      f"{stats.get('p95_us', '—')} | {stats.get('samples', '—')} |")
     for result in report["results"]:
@@ -382,7 +384,7 @@ def main():
                   suite=args.suite, options={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                   provenance=provenance(args.binary), results=[])
     shutil.copyfile(ROOT / "kernel.asc", args.output_dir / "kernel_snapshot.asc")
-    for header in ("matmul_plan.h", "small_plan.h", "small_vector.h", "stream_plan.h", "stream_matmul.asc", "joint_plan.h", "reduction_plan.h", "partial_sum.asc"):
+    for header in ("matmul_plan.h", "small_plan.h", "small_vector.h", "stream_plan.h", "stream_matmul.asc", "joint_plan.h", "reduction_plan.h", "partial_sum.asc", "iterate_plan.h", "iterate_matmul.asc"):
         shutil.copyfile(ROOT / header, args.output_dir / header)
     print("LOCAL_PERFORMANCE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     if args.tile_sweep:
