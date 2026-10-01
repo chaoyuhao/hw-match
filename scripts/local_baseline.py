@@ -227,10 +227,10 @@ def read_matmul_plan(directory, case):
 
 def read_execution_plan(directory, case, requested_family=None):
     path = directory / "execution_plan.json"
-    if requested_family not in (None, "auto", "gm", "small", "stream"):
+    if requested_family not in (None, "auto", "gm", "small", "stream", "pipeline"):
         raise ValueError("invalid requested execution family")
     if not path.is_file():
-        if requested_family in ("gm", "small", "stream"):
+        if requested_family in ("gm", "small", "stream", "pipeline"):
             raise ValueError("forced family requires execution metadata; rebuild the runner")
         return None  # Old runner/report compatibility.
     execution = plan_metadata.validate_execution(json.loads(path.read_text()), case)
@@ -318,7 +318,7 @@ def main():
     report["source_sha256"] = {str(path.relative_to(kernel.parent)): hashlib.sha256(path.read_bytes()).hexdigest()
                                for path in (kernel, kernel.with_name("matmul_plan.h"), kernel.with_name("small_plan.h"),
                                             kernel.with_name("small_vector.h"), kernel.with_name("stream_plan.h"),
-                                            kernel.with_name("stream_matmul.asc"), Path(__file__),
+                                            kernel.with_name("stream_matmul.asc"), kernel.with_name("joint_plan.h"), Path(__file__),
                                             Path(case_rules.__file__), kernel.parent / "scripts/plan_metadata.py")}
     print("LOCAL_BASELINE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     for case in cases:

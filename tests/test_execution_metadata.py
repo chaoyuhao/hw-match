@@ -120,3 +120,33 @@ class ExecutionMetadataTests(unittest.TestCase):
                 self.assertEqual(result['status'],'PASS',result)
                 self.assertEqual(result['similarity_validation'],'unavailable_in_stream_family')
                 self.assertNotIn('matmul_precision',result)
+
+    def test_pipeline_metadata_double_slots_and_validated_report(self):
+        case=dict(self.case,m=2,n=32,k=2)
+        stream=dict(planner_version=2,buffers=2,tile_m=16,tile_n=16,splits=1,row_pitch=32,
+                    c_slot_elements=32,maxima_offset=256,partial_offset=256,scratch_bytes=384,
+                    max_tiles_per_core=2,ub_used=47328,ub_budget=128*1024,
+                    inner_tile=dict(m=16,n=16,k=16))
+        selection=dict(planner_version=2,cost_model='joint-work-v1',score=100.25)
+        plan=dict(self.plan,family='pipeline',requested_family='pipeline',variant='mix_pipeline',
+                  problem=plan_metadata.problem(case),stream=stream,selection=selection)
+        del plan['ub_used']
+        self.assertEqual(plan_metadata.validate_execution(plan,case),plan)
+        for bad in (dict(buffers=1),dict(buffers=True),dict(planner_version=1),dict(maxima_offset=128),dict(scratch_bytes=256)):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):
+                plan_metadata.validate_execution(dict(plan,stream=dict(stream,**bad)),case)
+        for bad in (dict(score=float('nan')),dict(score=-1),dict(planner_version=1),dict(cost_model='unknown')):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):
+                plan_metadata.validate_execution(dict(plan,selection=dict(selection,**bad)),case)
+        missing=dict(plan);del missing['selection']
+        with self.assertRaises(ValueError):plan_metadata.validate_execution(missing,case)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            def fake_run(command,**kwargs):
+                directory=Path(command[1]);(directory/'y-0.bin').write_bytes((directory/'golden_y.bin').read_bytes())
+                (directory/'execution_plan.json').write_text(json.dumps(plan))
+                return mock.Mock(returncode=0)
+            with mock.patch.dict(os.environ,{'CANN_EXECUTION_FAMILY':'pipeline'}),mock.patch.object(baseline.subprocess,'run',side_effect=fake_run):
+                result=baseline.run_case(Path('/fake'),case,root/'pipeline',0,1,10,True)
+                self.assertEqual(result['status'],'PASS',result)
+                self.assertEqual(result['similarity_validation'],'unavailable_in_pipeline_family')

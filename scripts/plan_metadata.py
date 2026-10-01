@@ -82,7 +82,7 @@ def validate_execution(plan, case):
     if plan.get('problem') != problem(case):
         raise ValueError('execution input metadata mismatch')
     family, requested = plan.get('family'), plan.get('requested_family')
-    if family not in ('gm', 'small', 'stream') or requested not in ('auto', 'gm', 'small', 'stream'):
+    if family not in ('gm', 'small', 'stream', 'pipeline') or requested not in ('auto', 'gm', 'small', 'stream', 'pipeline'):
         raise ValueError('invalid execution family')
     if requested != 'auto' and requested != family:
         raise ValueError('requested and actual family differ')
@@ -93,11 +93,17 @@ def validate_execution(plan, case):
             raise ValueError('invalid execution counts/resources')
     if plan['available_cores'] > 65535 or plan['blocks'] != min(plan['tasks'], plan['available_cores']):
         raise ValueError('invalid execution blocks')
+    selection = plan.get('selection')
+    if selection is not None:
+        if (family == 'small' or not isinstance(selection,dict) or
+            selection.get('planner_version') != 2 or selection.get('cost_model') != 'joint-work-v1' or
+            type(selection.get('score')) not in (int,float) or not math.isfinite(selection['score']) or selection['score'] <= 0):
+            raise ValueError('invalid joint selection metadata')
     if family == 'gm':
         gm = validate(plan.get('matmul'), case)
         if plan.get('variant') != 'mix' or any(plan[k] != gm[k] for k in ('tasks','blocks','available_cores','ub_bytes')):
             raise ValueError('GM execution disagrees with Matmul plan')
-    elif family == 'stream':
+    elif family in ('stream','pipeline'):
         validate_stream(plan, case)
     else:
         b, m, n, k = (case[key] for key in ('b','m','n','k'))
@@ -129,8 +135,15 @@ def validate_execution(plan, case):
 def validate_stream(plan, case):
     """Validate emitted ownership/storage, not whether Auto chose an optimal plan."""
     s = plan.get('stream')
-    if not isinstance(s, dict) or s.get('planner_version') != 1 or plan.get('variant') != 'mix_stream' or 'matmul' in plan:
+    pipeline = plan['family'] == 'pipeline'
+    if (not isinstance(s, dict) or s.get('planner_version') not in (1,2) or
+        plan.get('variant') != ('mix_pipeline' if pipeline else 'mix_stream') or 'matmul' in plan):
         raise ValueError('invalid stream plan identity')
+    version = s['planner_version']
+    buffers = s.get('buffers', 1 if version == 1 else None)
+    if (type(buffers) is not int or buffers != (2 if pipeline else 1) or
+        (pipeline and version != 2) or (version == 2 and not plan.get('selection'))):
+        raise ValueError('stream buffering/selection mismatch')
     fields = ('tile_m','tile_n','splits','row_pitch','c_slot_elements','maxima_offset',
               'partial_offset','scratch_bytes','max_tiles_per_core','ub_used','ub_budget')
     if any(type(s.get(key)) is not int or s[key] < 1 for key in fields):
@@ -145,7 +158,7 @@ def validate_stream(plan, case):
         raise ValueError('invalid or empty stream task grid')
     pitch = (m+31)//32*32
     slot = min(m,tm)*tn
-    maxima = plan['blocks']*slot*4
+    maxima = plan['blocks']*buffers*slot*4
     partial = maxima + (b*pitch*4 if splits > 1 else 0)
     size = partial + b*pitch*4*splits
     expected = dict(row_pitch=pitch,c_slot_elements=slot,maxima_offset=maxima,
@@ -159,7 +172,7 @@ def validate_stream(plan, case):
     blocks = plan['blocks']
     period = splits // math.gcd(blocks,splits)
     load = 0
-    for core in range(blocks):
+    for core in range(min(blocks,splits)):
         count = (tasks-1-core)//blocks+1
         cycles, tail = divmod(count,period)
         weights = [columns*(((core+i*blocks)%splits)+1)//splits -

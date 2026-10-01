@@ -4,7 +4,7 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R13**：通用路径改为按行块拥有任务、按需拆 N、逐块 Matmul→Max，复用每核 C 临时槽；保留 R12 补偿求和与 Small 算法。66 项主机检查通过，已收到 S9 线上全部通过及收益/退化反馈；未做本地 CANN/NPU 测试。机制与复制清单见 [流式融合](docs/STREAMING_FUSION.md)。保留 R12/S8 与 R13/S9 两份性能对照，本次只归档。
+当前源码版本 **R14**：联合选择 GM/Stream/Pipeline、tile 与 N 分片，用双 GM C 槽显式重叠下一块 Cube 与上一块 Max；保留 R12 补偿求和与 Small 算法。68 项主机检查通过，未做本地 CANN/NPU 测试，等待 S10 线上结果。机制与复制清单见 [流式融合与异步流水](docs/STREAMING_FUSION.md)。R12/S8 与 R13/S9 保留作性能对照。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
@@ -16,7 +16,7 @@ R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-smal
 
 官方资料补充：[cann-learning-hub 调研](docs/LEARNING_HUB_REVIEW.md)；本地资料克隆目录已忽略。整体优化依据见 [实现架构审计](docs/ARCHITECTURE_AUDIT.md)，最新推进顺序以迭代记录和下一版设计为准。
 
-已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前版本需复制 **kernel.asc、matmul_plan.h、small_plan.h、small_vector.h、stream_plan.h、stream_matmul.asc** 到同目录，其余原始文件保持不变。
+已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前版本需复制 **kernel.asc、matmul_plan.h、small_plan.h、small_vector.h、stream_plan.h、stream_matmul.asc、joint_plan.h** 到同目录，其余原始文件保持不变。
 
 本地环境与测试仅用于开发调试；正确性、性能和最终得分以统一线上平台评测为准，环境小算子通过不代表赛题通过。
 

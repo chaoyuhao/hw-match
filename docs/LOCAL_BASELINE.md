@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R13 流式融合候选，66 项主机检查通过，未在本机做 CANN/NPU 测试，现已收到 S9 线上 15/15 Pass。保留 R12/S8 与 R13/S9 的收益/退化对照；平台源码哈希未核验。最新机制见 [流式融合](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。按开发决策，下面 NPU 命令仅作为可选工具，不是当前提交前置步骤。
+当前源码为 R14 联合规划/双槽流水候选，68 项主机检查通过，未在本机做 CANN/NPU 测试，等待 S10 线上结果。保留 R12/S8 与 R13/S9 的收益/退化对照。最新机制见 [流式融合与异步流水](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。按开发决策，下面 NPU 命令仅作为可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -8,7 +8,7 @@
 
 ## 线上修改范围
 
-用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选共六个源码文件：`kernel.asc`、`matmul_plan.h`、`small_plan.h`、`small_vector.h`、`stream_plan.h`、`stream_matmul.asc`；复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
+用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选共七个源码文件：`kernel.asc`、`matmul_plan.h`、`small_plan.h`、`small_vector.h`、`stream_plan.h`、`stream_matmul.asc`、`joint_plan.h`；复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
 
 原模板还明确要求：`kernel.asc` 被外部直接 include，不添加 `main()`、`#pragma once` 或 include guard，不重复定义已有的 TensorInfo/TensorGroupInfo。注释里的 `__cube__` 是示例，没有写明禁止 MIX；workspace、host 检查及调试 API 的许可不能从这段注释推断。
 

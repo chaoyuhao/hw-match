@@ -181,7 +181,7 @@ def provenance(binary):
                       ROOT / "scripts/local_baseline.py", ROOT / "scripts/perf_local.py",
                       ROOT / "scripts/tile_sweep.py", ROOT / "matmul_plan.h",
                       ROOT / "small_plan.h", ROOT / "small_vector.h",
-                      ROOT / "stream_plan.h", ROOT / "stream_matmul.asc",
+                      ROOT / "stream_plan.h", ROOT / "stream_matmul.asc", ROOT / "joint_plan.h",
                       ROOT / "scripts/case_rules.py", ROOT / "scripts/plan_metadata.py")})
     if binary:
         result["binary"] = str(binary)
@@ -268,9 +268,9 @@ def write_reports(report, output):
         execution = result.get("execution_plan", {})
         if execution.get("family") == "small":
             tile = f"small/{execution['variant']}; {execution['tasks']}/{execution['blocks']}"
-        if execution.get("family") == "stream":
+        if execution.get("family") in ("stream", "pipeline"):
             s = execution['stream']
-            tile = f"stream {s['tile_m']}×{s['tile_n']}, N/{s['splits']}; {execution['tasks']}/{execution['blocks']}"
+            tile = f"{execution['family']} {s['tile_m']}×{s['tile_n']}, N/{s['splits']}; {execution['tasks']}/{execution['blocks']}"
         lines.append(f"| {result['case']['name']} | {result['status']} | {tile} | {stats.get('median_us', '—')} | "
                      f"{stats.get('p95_us', '—')} | {stats.get('samples', '—')} |")
     for result in report["results"]:
@@ -375,7 +375,7 @@ def main():
                   suite=args.suite, options={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                   provenance=provenance(args.binary), results=[])
     shutil.copyfile(ROOT / "kernel.asc", args.output_dir / "kernel_snapshot.asc")
-    for header in ("matmul_plan.h", "small_plan.h", "small_vector.h", "stream_plan.h", "stream_matmul.asc"):
+    for header in ("matmul_plan.h", "small_plan.h", "small_vector.h", "stream_plan.h", "stream_matmul.asc", "joint_plan.h"):
         shutil.copyfile(ROOT / header, args.output_dir / header)
     print("LOCAL_PERFORMANCE; ONLINE_EVALUATION=NOT_RUN", flush=True)
     if args.tile_sweep:

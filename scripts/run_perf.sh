@@ -33,7 +33,7 @@ run_all() {
     echo 'LOCAL_PERFORMANCE; ONLINE_EVALUATION=NOT_RUN'
     git -C "$PROJECT_ROOT" rev-parse HEAD
     git -C "$PROJECT_ROOT" status --short
-    sha256sum "$PROJECT_ROOT/kernel.asc" "$PROJECT_ROOT/matmul_plan.h" "$PROJECT_ROOT/small_plan.h" "$PROJECT_ROOT/small_vector.h" "$PROJECT_ROOT/stream_plan.h" "$PROJECT_ROOT/stream_matmul.asc"
+    sha256sum "$PROJECT_ROOT/kernel.asc" "$PROJECT_ROOT/matmul_plan.h" "$PROJECT_ROOT/small_plan.h" "$PROJECT_ROOT/small_vector.h" "$PROJECT_ROOT/stream_plan.h" "$PROJECT_ROOT/stream_matmul.asc" "$PROJECT_ROOT/joint_plan.h"
     if [ "$BUILD_REQUIRED" -eq 0 ]; then
         python3 "$PROJECT_ROOT/scripts/perf_local.py" --output-dir "$RUN_DIR/cases" "$@"
     else

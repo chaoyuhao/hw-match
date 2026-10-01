@@ -5,41 +5,60 @@ struct Aligned {
  explicit Aligned(size_t count) { require(posix_memalign(reinterpret_cast<void**>(&data),64,count*4)==0,"allocation");std::fill(data,data+count,123456.0f); }
  ~Aligned(){std::free(data);}
 };
-static float* scratchStart; static size_t cFloats;
+static float* scratchStart; static size_t cFloats; static uint32_t bufferCount;
 static std::vector<bool> consumed;
+static std::vector<unsigned> lastReadFence;
+static float* pendingStart=nullptr;static size_t pendingSize=0;
+static unsigned asyncIssues=0,asyncWaits=0,overlappedReads=0;
 void trackRead(float* p) {
  auto a=reinterpret_cast<uintptr_t>(p),b=reinterpret_cast<uintptr_t>(scratchStart);
- if(a>=b && a<b+cFloats*4) consumed[(a-b)/4]=true;
+ if(a>=b && a<b+cFloats*4) {
+  auto pending=reinterpret_cast<uintptr_t>(pendingStart);
+  require(!pendingStart || a<pending || a>=pending+pendingSize*4,"read of pending Cube output");
+  if(pendingStart)++overlappedReads;
+  const size_t i=(a-b)/4;consumed[i]=true;lastReadFence[i]=AscendC::mte2Fences;
+ }
 }
 struct CpuMatmul {
- uint32_t m=0,n=0,k=0,pitch=0,rows=0,cols=0; bool ta=false,tb=false;
- AscendC::GlobalTensor<float> a,b;
- unsigned previousFence=0; bool used=false;
- void SetOrgShape(uint32_t M,uint32_t N,uint32_t K,uint32_t Kb,uint32_t P){require(K==Kb,"K mismatch");m=M;n=N;k=K;pitch=P;}
- void SetSingleShape(uint32_t R,uint32_t C,uint32_t K){require(K==k,"partial K");rows=R;cols=C;}
- void SetTensorA(AscendC::GlobalTensor<float> A,bool T){a=A;ta=T;}
- void SetTensorB(AscendC::GlobalTensor<float> B,bool T){b=B;tb=T;}
- void IterateAll(AscendC::GlobalTensor<float> c) {
+ uint32_t m=0,n=0,k=0,pitch=0,rows=0,cols=0; bool ta=false,tb=false,pending=false;
+ AscendC::GlobalTensor<float> a,b,destination;
+ void ready(){require(!pending,"Matmul reconfigured before wait");}
+ void SetOrgShape(uint32_t M,uint32_t N,uint32_t K,uint32_t Kb,uint32_t P){ready();require(K==Kb,"K mismatch");m=M;n=N;k=K;pitch=P;}
+ void SetSingleShape(uint32_t R,uint32_t C,uint32_t K){ready();require(K==k,"partial K");rows=R;cols=C;}
+ void SetTensorA(AscendC::GlobalTensor<float> A,bool T){ready();a=A;ta=T;}
+ void SetTensorB(AscendC::GlobalTensor<float> B,bool T){ready();b=B;tb=T;}
+ void materialize() {
   using namespace AscendC;
-  require(!used || mte2Fences>previousFence,"C overwritten before explicit MTE2->Scalar fence");
-  size_t slot=0; auto& region=locate(c.data,slot);
-  const size_t size=cFloats/blockNum;
-  require(slot==GetBlockIdx()*size,"C slot not owned by core");
-  for(size_t i=slot;i<slot+size;++i){require(!region.readable[i]||consumed[i],"overwriting unread C");region.writes[i]=0;region.readable[i]=false;consumed[i]=false;}
   for(uint32_t r=0;r<rows;++r) for(uint32_t col=0;col<cols;++col) {
    float sum=0;
    for(uint32_t q=0;q<k;++q) sum+=readGm(a.data+(ta?q*m+r:r*k+q))*readGm(b.data+(tb?col*k+q:q*n+col));
-   writeGm(c.data+r*pitch+col,sum);
+   writeGm(destination.data+r*pitch+col,sum);
   }
-  previousFence=mte2Fences;used=true;
  }
- void End(){}
+ template<bool Sync=true>void IterateAll(AscendC::GlobalTensor<float> c,uint8_t atomic=0,bool sequential=false,bool wait=false) {
+  using namespace AscendC;ready();
+  require(!atomic&&!sequential,"unsupported test call");
+  require(Sync || wait,"async call must enable WaitIterateAll");
+  size_t slot=0;auto& region=locate(c.data,slot);
+  const size_t coreSize=cFloats/blockNum,size=coreSize/bufferCount;
+  require(slot>=GetBlockIdx()*coreSize && slot+size<=(GetBlockIdx()+1)*coreSize && slot%size==0,"C slot not owned by core");
+  for(size_t i=slot;i<slot+size;++i){
+   require(!region.readable[i]||consumed[i],"overwriting unread C");
+   require(!region.readable[i]||mte2Fences>lastReadFence[i],"C overwritten before MTE2->Scalar fence");
+   region.writes[i]=0;region.readable[i]=false;consumed[i]=false;
+  }
+  destination=c;
+  if(Sync)materialize();
+  else {pending=true;pendingStart=c.data;pendingSize=size;++asyncIssues;}
+ }
+ void WaitIterateAll(){require(pending,"wait without pending Matmul");materialize();pending=false;pendingStart=nullptr;pendingSize=0;++asyncWaits;}
+ void End(){ready();}
 };
 template<bool TA,bool TB>
-void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t tileN,uint32_t cores,uint32_t splits,int pattern) {
+void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t tileN,uint32_t cores,uint32_t splits,int pattern,uint32_t buffers) {
  using namespace AscendC; using namespace local_baseline;
  ProblemDesc p{B,M,N,K,1,TA,TB};HardwareCaps h{cores,192*1024};
- auto mm=MakePlan(p,h,{tileM,tileN});auto plan=SplitStreamPlan(p,h,mm,splits);
+ auto mm=MakePlan(p,h,{tileM,tileN});auto plan=SplitStreamPlan(p,h,mm,splits,buffers);
  size_t ac=size_t(B)*M*K,bc=size_t(B)*K*N,sc=plan.scratchBytes/4;
  Aligned aa(ac+32),bb(bc+32),ss(sc+32),yy(B+32);
  float* a=aa.data+16;float* b=bb.data+16;float* s=ss.data+16;float* y=yy.data+16;
@@ -74,25 +93,30 @@ void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t t
   }golden[batch]=sum;
  }
  if(pattern==3)require(golden[0]==200,"bad Max-before-Sum counterexample");
- blockNum=plan.blocks;scratchStart=s;cFloats=plan.maximaOffset/4;consumed.assign(cFloats,false);readHook=trackRead;
+ blockNum=plan.blocks;scratchStart=s;cFloats=plan.maximaOffset/4;consumed.assign(cFloats,false);lastReadFence.assign(cFloats,0);readHook=trackRead;
+ bufferCount=buffers;asyncIssues=asyncWaits=overlappedReads=0;
  std::vector<TPipe> pipes(blockNum);
- for(blockIdx=0;blockIdx<blockNum;++blockIdx){CpuMatmul cpu;StreamProduce<float,TA,TB>(pipes[blockIdx],cpu,(GM_ADDR)a,(GM_ADDR)b,(GM_ADDR)s,B,M,N,K,plan);}
+ for(blockIdx=0;blockIdx<blockNum;++blockIdx){CpuMatmul cpu;StreamProduce<float,TA,TB>(pipes[blockIdx],cpu,(GM_ADDR)a,(GM_ADDR)b,(GM_ADDR)s,B,M,N,K,plan);require(!cpu.pending,"task finished with pending Matmul");}
  if(splits>1)for(blockIdx=0;blockIdx<blockNum;++blockIdx)MergeStreamMaxima(pipes[blockIdx],(GM_ADDR)s,B,M,plan);
  for(blockIdx=0;blockIdx<blockNum;++blockIdx)SumRowMaxima(pipes[blockIdx],(GM_ADDR)s+plan.maximaOffset,(GM_ADDR)y,B,M,plan.rowPitch);
  readHook=nullptr;
+ require(asyncIssues==asyncWaits,"async work not drained");
+ if(buffers==2){require(asyncIssues>0,"double buffer path never issues async Matmul");if((N+tileN-1)/tileN>splits)require(overlappedReads>0,"no producer/consumer overlap");}
+ else require(!asyncIssues&&!overlappedReads,"legacy path changed to async");
  for(uint32_t batch=0;batch<B;++batch)require(y[batch]==golden[batch]&&regions[3].writes[batch]==1,"wrong/missing output");
  require(std::equal(a,a+ac,beforeA.begin())&&std::equal(b,b+bc,beforeB.begin()),"input mutation");
  for(size_t i=0;i<16;++i)require(ss.data[i]==123456 &&ss.data[16+sc+i]==123456&&yy.data[i]==123456&&yy.data[16+B+i]==123456,"guard mutation");
  for(auto& pipe:pipes)require(pipe.bytes==plan.ubBytes,"UB accounting differs from real helper allocation");
 }
 template<bool TA,bool TB>void layouts(){
+ for(uint32_t buffers:{1u,2u}){
  for(uint32_t tileM:{16u,64u,256u})for(uint32_t tileN:{16u,64u,256u})for(uint32_t edge:{0u,1u}){
   auto m=tileM+edge,n=tileN*2+edge;
-  for(uint32_t splits:{1u,2u}) check<TA,TB>(3,m,n,7,tileM,tileN,3,splits,edge);
+  for(uint32_t splits:{1u,2u}) check<TA,TB>(3,m,n,7,tileM,tileN,3,splits,edge,buffers);
  }
- check<TA,TB>(9,17,33,257,16,16,24,2,0);
- check<TA,TB>(1,2,32,2,16,16,24,2,3);
- check<TA,TB>(2,1027,1,1,256,16,3,1,4);
- check<TA,TB>(1,1,1,1,16,16,24,1,2);
-}
+ check<TA,TB>(9,17,33,257,16,16,24,2,0,buffers);
+ check<TA,TB>(1,2,32,2,16,16,24,2,3,buffers);
+ check<TA,TB>(2,1027,1,1,256,16,3,1,4,buffers);
+ check<TA,TB>(1,1,1,1,16,16,24,1,2,buffers);
+}}
 int main(){layouts<false,false>();layouts<false,true>();layouts<true,false>();layouts<true,true>();}

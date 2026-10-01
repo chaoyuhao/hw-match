@@ -1,4 +1,6 @@
-# R13：按行块逐块融合 Matmul → Max
+# 流式 Matmul → Max：R13 同步融合与 R14 异步流水
+
+当前源码为 R14，最新机制与复制清单见文末。以下 R13 段落保留为 S9 的历史解释；其中“默认”指 R13。
 
 R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥有一个 C 临时槽，一个任务拥有 `(batch, M 行块, N 分片)`，遍历分片内所有 N 块。每块沿完整 K 做 Matmul，立即在 Vector 上更新该任务的行最大值，再复用 C 槽。最终 Sum 沿用 R12 的补偿树，Small 的算法和自动门槛不变。
 
@@ -53,3 +55,44 @@ S=1 时最终与分片 Max 为同一数组；S>1 时最后区域占 `B*S*rowPitc
 若线上已有 R12，替换 **kernel.asc、small_plan.h**，新增 **stream_plan.h、stream_matmul.asc**。同时保留同目录已有的 **matmul_plan.h、small_vector.h**，共六个源码文件。其余平台原始文件不变，不需要提交包。
 
 官方依据与后续异步方向见[已批准设计](superpowers/specs/2026-09-30-next-wave-optimization-design.md)。
+
+
+## R14：联合规划与双 GM 槽异步流水（2026-10-01）
+
+R13 先按完整 GM 网格选 tile，然后把它交给不同任务网格的 Stream。本轮在 `joint_plan.h` 联合比较 `(family, tileM, tileN, N splits, buffers)`；SDK 接受后直接执行完整计划，不再二次修改分工。Auto 保留 Small 准入，其余在 GM、同步 Stream 和异步 Pipeline 中选择。
+
+规则仍来自实际 B/M/N/K、布局和资源。每组外层 tile 的 N 分片候选包括 1、2 的幂、完整 N 网格和填满核数附近值，不因行任务数超过核数而提前停止。每 geometry/family 保留最低结构成本，最多 147 个最终候选。SDK 至多尝试 4 个不同 geometry，再尝试未试过的 32×64 回退；拒绝同 geometry 后不会再为另一 family 重复尝试相同 SDK tiling。显式 tile 拒绝时直接报错，不偷偷改 tile。
+
+共同成本包含：16×16×16 Cube 工作单元、布局相关输入字节、每调用固定项、32×256 DMA/64 列 Max 工作、任务初始化、跨 N 分片合并、屏障和 R12 最终 Sum。同步 producer 累加 Cube 和 Vector；Pipeline 按 `max(Cube,Vector)` 的稳态及每个任务的预热/排空估计。任务最大数和块最大数可能属于不同核，因此是结构上界近似。固定权重没有测量校准，`selection.score` **不是周期、微秒、预测加速比或最优性证明**；SDK 内层 tiling 对真实代价的影响也尚未校准。
+
+Pipeline 自动候选要求每个 N shard 至少有两块，才存在块间重叠；本地强制 pipeline 仍能处理单块以验证边界。其执行顺序为：
+
+```text
+预热：Cube 写槽0 → Wait → End
+稳态：Cube 异步写槽1 ── 与 Vector 读槽0 / 更新 Max 重叠
+      槽0读完的 MTE2_S fence → Wait 槽1 → End
+      Cube 异步写槽0 ── 与 Vector 读槽1 / 更新 Max 重叠
+收尾：消费最后一块 → 写行 Max → 原有跨片 Max（如需要）→ R12 Sum
+```
+
+每次只有一个 Matmul 调用在途；上一调用 Wait/End 后才更改 shape/A/B。每个旧槽在全部 DMA 读完后才可重写；任务结束和全核屏障前排空在途计算。接口使用 `IterateAll<false>(c, 0, false, true)` 与 `WaitIterateAll()`，依据 [CANN 9.0 异步说明](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/programug/Ascendcopdevg/atlas_ascendc_10_10015.html) 和 [WaitIterateAll API](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0641.html)。
+
+只将每核 GM C 槽扩为两个；UB 输入队列仍为一份 32×256 float，归约 UB 峰值仍为 48544 字节，未突破预留 64 KiB。两个槽的首地址为 `(core*buffers + slot)*cSlotElements`，行 Max/部分 Max 从全部 C 槽之后开始。C 的 GM 逻辑读写量仍是 O(BMN)，本轮没有实现 A 在 L1 跨调用常驻、C 直达 UB 或 Max 就地部分 Sum。
+
+### 本地对照与报告
+
+- `auto`：Small 或新的联合规划。
+- `gm`：旧 GM 规划与完整 similarity，保留 R12 对照。
+- `stream`：旧规划与同步单槽，保留 R13 对照。
+- `pipeline`：只在异步双槽候选中联合选 tile/分片。
+- Auto + 显式 `CANN_MATMUL_TILE` 保持 GM sweep 契约。线上入口固定使用 Auto；本地可通过 `CANN_EXECUTION_FAMILY` 指定族。
+
+报告 schema 3 增加 `family=pipeline`、`variant=mix_pipeline`、Stream 的 `buffers`/planner v2 及 `selection` 成本模型版本/分数；实际 SDK `baseM/baseN/baseK` 继续记录。旧 v1 Stream 报告缺少 buffers 时按 1 验证。Stream/Pipeline 均明确无完整 similarity，源码快照与哈希纳入 `joint_plan.h`。
+
+### 提交与验证
+
+已有 R13 时，替换 **kernel.asc、small_plan.h、stream_plan.h、stream_matmul.asc**，新增 **joint_plan.h**；继续保留 **matmul_plan.h、small_vector.h**。共七个源码文件，放在同一目录。其余平台原始文件不改，不需要提交包。
+
+完整主机回归 **68/68 通过（58.583 秒）**。真实 C++ planner 检查规则候选、独立任务枚举负载、双槽偏移、资源上界、溢出和有界 SDK 拒绝。真实设备 helper 由 CPU 操作替身执行 320 组组合，异步 C 只在 Wait 时生成，检查未完成读取、跨核槽覆盖、旧槽消费 fence、实际 pending 期间消费以及 FP64 参考；补充真实主机分派/JSON 和旧新报告验证。CPU 替身不是硬件模拟器，不能证明真实 Cube 精度、设备时序或 SDK 编译。
+
+`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`。等待 S10；重点比较 S8 的 8–13 和 S9 的 14，单独跟踪 5/6 与 15，不把结构模型分数换算为线上提速。
