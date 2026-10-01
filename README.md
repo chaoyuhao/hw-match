@@ -4,7 +4,7 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R16**：冻结 R15 的 SDK 接受计划后，对资源合法且能压缩有效行数据的 Rows 扩围到 Partials。算法族、分块、N 分片、核数与设备 helper 保留；74 项主机检查通过，CPU 元数据样本覆盖从 28.84% 增至 65.96%。**S12 线上 15/15 通过，但未见明显新增收益**；CPU 覆盖率不等同线上命中率。未做本地 CANN/NPU 测试；R15/S11 是直接对照。后续优先研究 Matmul→Max 的调用与传递结构，当前归档不改算子。已有 R15 只需替换 `kernel.asc`、`joint_plan.h`。机制见 [受控覆盖](docs/STREAMING_FUSION.md#r16冻结上游计划的受控覆盖2026-10-01)。
+当前源码版本 **R17：S2 上游受控对照**。`kernel.asc` 的 `S2_UPSTREAM_CONTROL = true` 默认将通用 Auto 的上游改为 GM＋32×64，保留 Small 与 R16 选定的 Rows/Partials 模式；设为 `false` 恢复 R16。SDK 拒绝时保留原计划。74 项主机检查通过，**等待 S13，尚无性能结论**；这是检验点 15 历史退化的实验，其他点可能变慢。已有 R16 只需替换 `kernel.asc`，无新增文件。机制与边界见 [S2 上游对照](docs/STREAMING_FUSION.md#r17s2-上游受控对照2026-10-01)。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 

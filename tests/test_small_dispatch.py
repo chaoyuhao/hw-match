@@ -31,7 +31,7 @@ class SmallDispatchTests(unittest.TestCase):
 using half=int16_t;using bfloat16_t=uint16_t;using aclrtStream=void*;
 struct TensorInfo{const int64_t* shape;int64_t numDims;int32_t dtype;};
 struct TensorGroupInfo{const TensorInfo*tensors;int64_t numTensors;};
-static int rejectFirst;static std::vector<std::pair<unsigned,unsigned>> attempts;
+static bool rejectS2;static int rejectFirst;static std::vector<std::pair<unsigned,unsigned>> attempts;
 static int launches,allocs,tilers;static uint32_t launchReduction;static size_t scratchBytes;static bool failSync,failTiler;
 int aclrtSynchronizeStreamWithTimeout(aclrtStream,int){return failSync?1:0;}
 namespace platform_ascendc {
@@ -44,27 +44,29 @@ size_t Bytes(uint64_t x,uint64_t y,uint64_t z,size_t s){return PlanProduct(PlanP
 struct DeviceBuffer{void*data=nullptr;DeviceBuffer()=default;explicit DeviceBuffer(size_t bytes){if(!allocs)scratchBytes=bytes;++allocs;data=(void*)16;}};
 struct FakeTiling{uint32_t baseM=16,baseN=16,baseK=16;};
 struct PreparedMatmul{MatmulPlan plan{};HardwareCaps caps{};FakeTiling tiling{};};
-struct PreparedExecution:PreparedMatmul{bool isStream=false;StreamPlan stream{};ReductionPlan reduction{};uint32_t executionPlanner=0;double executionScore=0;bool expansionTracked=false,expansionEnabled=false;uint32_t baselineReductionMode=0;double baselineExecutionScore=0;};
-struct ExecutionInfo:PreparedExecution{bool isSmall=false;SmallPlan small{};};
+PREPARED_STRUCTS
 HardwareCaps QueryCaps(uint32_t cores){return {cores,192*1024};}
-bool TryPrepare(ProblemDesc p,HardwareCaps c,TileRequest tile,PreparedMatmul& out){++tilers;attempts.push_back({tile.m,tile.n});out={MakePlan(p,c,tile),c,{tile.m,tile.n,16}};return !failTiler && tilers>rejectFirst;}
+bool TryPrepare(ProblemDesc p,HardwareCaps c,TileRequest tile,PreparedMatmul& out){++tilers;attempts.push_back({tile.m,tile.n});out={MakePlan(p,c,tile),c,{tile.m,tile.n,16}};assert(launches==0);return !failTiler && tilers>rejectFirst && !(rejectS2&&tile.m==32&&tile.n==64);}
 struct StreamCompletion{bool pending=false;StreamCompletion(aclrtStream,DeviceBuffer&,DeviceBuffer&){}void Finish(){Check(failSync,"sync");}};
 template<typename T,typename...Args> void MockSmallLaunch(uint32_t blocks,Args...){assert(blocks>0);++launches;}
 template<typename T,typename...Args> void Dispatch(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).mode;}
 template<typename T,typename...Args> void DispatchStream(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).reduction.mode;}
 '''
+        structs=kernel[kernel.index('struct PreparedExecution :'):kernel.index('inline HardwareCaps QueryCaps')]
+        config='\n'.join(line for line in kernel.splitlines() if line.startswith('constexpr bool S2_UPSTREAM_CONTROL'))
+        prefix=prefix.replace('PREPARED_STRUCTS',config+'\n'+structs)
         suffix=r'''
 } // namespace local_baseline
 void Require(bool b,const std::string&s){if(!b)throw std::runtime_error(s);}
 '''
         main=r'''
-void run(uint64_t batches,uint32_t m,uint32_t n,uint32_t k,bool ta,bool tb,local_baseline::ExecutionFamily family,bool expectedSmall,bool fail=false,local_baseline::TileRequest tile={},int dtype=1,local_baseline::ReductionPolicy sumPolicy=local_baseline::ReductionPolicy::Auto,bool expand=true){
+void run(uint64_t batches,uint32_t m,uint32_t n,uint32_t k,bool ta,bool tb,local_baseline::ExecutionFamily family,bool expectedSmall,bool fail=false,local_baseline::TileRequest tile={},int dtype=1,local_baseline::ReductionPolicy sumPolicy=local_baseline::ReductionPolicy::Auto,bool expand=true,bool s2=false){
  using namespace local_baseline;
  int64_t as[]={static_cast<int64_t>(batches),ta?k:m,ta?m:k},bs[]={static_cast<int64_t>(batches),tb?n:k,tb?k:n},ys[]={static_cast<int64_t>(batches)};
  TensorInfo ai{as,3,dtype},bi{bs,3,dtype},yi{ys,1,0};TensorGroupInfo ag{&ai,1},bg{&bi,1},yg{&yi,1};
  uint8_t a=0,b=0,y=0;launches=allocs=tilers=0;ExecutionInfo actual;bool caught=false;
- try{auto scratch=RunKernel(&a,ag,&b,bg,&y,yg,24,(void*)1,ta,tb,tile,&actual,family,sumPolicy,expand);
-     assert(!fail);assert(bool(scratch.data)==!expectedSmall);assert(actual.isSmall==expectedSmall);
+ try{auto scratch=RunKernel(&a,ag,&b,bg,&y,yg,24,(void*)1,ta,tb,tile,&actual,family,sumPolicy,expand,s2);
+     assert(!fail);assert(bool(scratch.data)==!expectedSmall);assert(actual.isSmall==expectedSmall);assert(!actual.s2Attempted);
      if(family==ExecutionFamily::Stream || family==ExecutionFamily::Pipeline){assert(actual.isStream);assert(actual.stream.buffers==(family==ExecutionFamily::Pipeline?2u:1u));}
      if(family==ExecutionFamily::Gm || (tile.m&&family==ExecutionFamily::Auto))assert(!actual.isStream);
      if(!expectedSmall && family==ExecutionFamily::Auto && !tile.m){
@@ -85,7 +87,7 @@ void run(uint64_t batches,uint32_t m,uint32_t n,uint32_t k,bool ta,bool tb,local
 }
 
 void frozenSdkSelection(){
- using namespace local_baseline;HardwareCaps h{24,192*1024};
+ using namespace local_baseline;HardwareCaps h{24,192*1024};launches=0;
  for(unsigned batch:{1u,192u})for(unsigned m:{33u,1024u})for(int skip=0;skip<=4;++skip){
   ProblemDesc p{batch,m,1024,256,1,false,false};rejectFirst=skip;
   PreparedExecution old,current;bool failedOld=false,failedNew=false;
@@ -103,7 +105,71 @@ void frozenSdkSelection(){
  }
  rejectFirst=0;
 }
+
+local_baseline::ExecutionInfo invokeS2(const local_baseline::ProblemDesc& p,bool use,bool defaults=false){
+ using namespace local_baseline;
+ int64_t as[]={int64_t(p.batches),p.ta?p.k:p.m,p.ta?p.m:p.k},bs[]={int64_t(p.batches),p.tb?p.n:p.k,p.tb?p.k:p.n},ys[]={int64_t(p.batches)};
+ TensorInfo ai{as,3,int32_t(p.dtype)},bi{bs,3,int32_t(p.dtype)},yi{ys,1,0};TensorGroupInfo ag{&ai,1},bg{&bi,1},yg{&yi,1};
+ uint8_t a=0,b=0,y=0;ExecutionInfo actual;launches=allocs=tilers=0;attempts.clear();
+ if(defaults)RunKernel(&a,ag,&b,bg,&y,yg,24,(void*)1,p.ta,p.tb,{},&actual);
+ else RunKernel(&a,ag,&b,bg,&y,yg,24,(void*)1,p.ta,p.tb,{},&actual,ExecutionFamily::Auto,ReductionPolicy::Auto,true,use);
+ assert(launches==1 && allocs==(actual.isSmall?0:2));
+ if(!actual.isSmall)assert(scratchBytes==(actual.isStream?actual.stream.scratchBytes:p.batches*p.m*((p.n+15)/16*16)*4+actual.reduction.bytes));
+ return actual;
+}
+void s2Control(){
+ using namespace local_baseline;
+ for(unsigned dtype:{1u,2u})for(bool ta:{false,true})for(bool tb:{false,true})
+ for(auto dims:{std::array<unsigned,4>{1,17,65,32},std::array<unsigned,4>{3,33,129,65},std::array<unsigned,4>{192,1024,1024,256},std::array<unsigned,4>{1,8192,16,32},std::array<unsigned,4>{32,32,64,256}}){
+   ProblemDesc p{dims[0],dims[1],dims[2],dims[3],dtype,ta,tb};
+   const auto old=invokeS2(p,false);auto oldAttempts=attempts;
+   const auto fixed=invokeS2(p,true);
+   assert(!old.isSmall && !fixed.isSmall && !fixed.isStream);
+   assert(!old.s2Attempted && fixed.s2Attempted && fixed.s2Selected && !fixed.expansionTracked);
+   assert(fixed.plan.tileM==32 && fixed.plan.tileN==64);
+   const uint64_t tasks=p.batches*((p.m+31)/32)*((p.n+63)/64);
+   assert(fixed.plan.tasks==tasks && fixed.plan.blocks==std::min<uint64_t>(24,tasks));
+   assert(fixed.tiling.baseM==32 && fixed.tiling.baseN==64);
+   assert(fixed.reduction.mode==old.reduction.mode && fixed.reduction.segmentRows==32);
+   assert(fixed.s2Reference.reduction.mode==old.reduction.mode && fixed.s2Reference.score==old.executionScore);
+   assert(fixed.s2Reference.matmul.tileM==old.plan.tileM && fixed.s2Reference.matmul.tileN==old.plan.tileN);
+   assert(fixed.s2Reference.family==(old.isStream?(old.stream.buffers==2?ExecutionFamily::Pipeline:ExecutionFamily::Stream):ExecutionFamily::Gm));
+   assert(fixed.executionScore>0 && fixed.reduction.mode==launchReduction);
+   assert(attempts.size()==oldAttempts.size()+((old.plan.tileM==32 && old.plan.tileN==64)?0:1));
+   assert(std::equal(oldAttempts.begin(),oldAttempts.end(),attempts.begin()));
+   std::cout<<ExecutionJson(fixed,p,"auto","auto")<<'\n';
+ }
+ // Rejection must preserve the accepted reference plan, inner tile and scratch.
+ ProblemDesc p{192,1024,1024,256,1,false,false};rejectS2=true;
+ auto old=invokeS2(p,false);const auto expectedScratch=scratchBytes;
+ auto rejected=invokeS2(p,true);
+ assert(rejected.s2Attempted && !rejected.s2Selected);
+ assert(rejected.isStream==old.isStream && rejected.plan.tileM==old.plan.tileM && rejected.plan.tileN==old.plan.tileN);
+ assert(rejected.tiling.baseM==old.tiling.baseM && rejected.tiling.baseN==old.tiling.baseN && scratchBytes==expectedScratch);
+ assert(rejected.executionScore==old.executionScore && rejected.reduction.mode==old.reduction.mode && rejected.expansionTracked);
+ std::cout<<ExecutionJson(rejected,p,"auto","auto")<<'\n';rejectS2=false;
+ // Exercise the same default argument used by the online entry and local runner.
+ auto configured=invokeS2(p,false,true);
+ assert(configured.s2Attempted==S2_UPSTREAM_CONTROL);
+ if(S2_UPSTREAM_CONTROL)assert(configured.s2Selected && !configured.isStream && configured.plan.tileM==32 && configured.plan.tileN==64);
+ std::cout<<ExecutionJson(configured,p,"auto","auto")<<'\n';
+ run(1,1,1,32,false,false,ExecutionFamily::Auto,true,false,{},1,ReductionPolicy::Auto,true,true);
+ run(1,17,65,32,false,false,ExecutionFamily::Auto,false,false,{},1,ReductionPolicy::Auto,false,true);
+ run(3,17,129,33,false,false,ExecutionFamily::Pipeline,false,false,{16,32},2,ReductionPolicy::Auto,true,true);
+ run(3,17,129,33,false,false,ExecutionFamily::Auto,false,false,{32,64},1,ReductionPolicy::Auto,true,true);
+ for(auto mode:{ReductionPolicy::Rows,ReductionPolicy::Partials})
+  run(1,8192,16,32,false,false,ExecutionFamily::Auto,false,false,{},1,mode,true,true);
+ // Tiling or execution failure must not trigger a second launch.
+ failTiler=true;bool caught=false;
+ try{invokeS2(p,true);}catch(const std::runtime_error&){caught=true;}
+ assert(caught && launches==0 && allocs==0);failTiler=false;
+ failSync=true;caught=false;
+ try{invokeS2(p,true);}catch(const std::runtime_error&){caught=true;}
+ assert(caught && launches==1);failSync=false;
+}
+
 int main(){using local_baseline::ExecutionFamily;using local_baseline::ReductionPolicy;
+ s2Control();
  assert(SumPolicy("r15")==ReductionPolicy::Auto);
  frozenSdkSelection();
  for(int dtype:{1,2})for(bool expand:{false,true}) {
@@ -152,7 +218,38 @@ int main(){using local_baseline::ExecutionFamily;using local_baseline::Reduction
             done=subprocess.run([str(binary)],capture_output=True,text=True)
             self.assertEqual(done.returncode,0,done.stderr)
             rows=[json.loads(line) for line in done.stdout.splitlines()]
-            self.assertEqual(len(rows),72)
+            self.assertEqual(len(rows),120)
+            self.assertTrue(any(row.get('upstream_control',{}).get('status')=='selected' and
+                                (row['upstream_control']['reference_tile_m'],row['upstream_control']['reference_tile_n'])==(32,64)
+                                for row in rows))
             self.assertTrue({16,32} <= {row.get('dot_columns') for row in rows})
             for row in rows:
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)
+
+            selected=next(row for row in rows if row.get('upstream_control',{}).get('status')=='selected')
+            rejected=next(row for row in rows if row.get('upstream_control',{}).get('status')=='sdk_rejected')
+            for original,changes in [(selected,dict(version=True)),(selected,dict(status='guess')),
+                                     (selected,dict(reference_tile_m=17)),(selected,dict(reference_score=-1)),
+                                     (selected,dict(reference_reduction='invalid')),
+                                     (rejected,dict(reference_score=rejected['selection']['score']+1))]:
+                bad=json.loads(json.dumps(original));bad['upstream_control'].update(changes)
+                with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
+            bad=json.loads(json.dumps(selected));bad['upstream_control']=None
+            with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
+            bad=json.loads(json.dumps(selected));bad['requested_family']='gm'
+            with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
+            bad=json.loads(json.dumps(selected));bad['upstream_control']['reference_reduction']='rows' if bad['reduction']['mode']=='partials' else 'partials'
+            with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
+
+            source.write_text((prefix+prepare+host+suffix+writers+main).replace(
+                'constexpr bool S2_UPSTREAM_CONTROL = true;', 'constexpr bool S2_UPSTREAM_CONTROL = false;'))
+            done=subprocess.run(['/usr/bin/g++','-std=c++14','-O2','-Wall','-Wextra','-Werror','-I',str(ROOT),str(source),'-o',str(binary)],capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stderr)
+            done=subprocess.run([str(binary)],capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stderr)
+            restored=[json.loads(line) for line in done.stdout.splitlines()]
+            self.assertEqual(len(restored),len(rows))
+            changes=[(a,b) for a,b in zip(rows,restored) if a!=b]
+            self.assertEqual(len(changes),1)  # Only the default-argument invocation changes.
+            self.assertNotIn('upstream_control',changes[0][1])
+            for row in restored:self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)

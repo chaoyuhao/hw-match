@@ -276,6 +276,8 @@ def write_reports(report, output):
             tile += f"; sum={reduction['mode']} (M/{reduction['segment_rows']})"
         if execution.get("reduction_expansion", {}).get("applied"):
             tile += "; expanded rows→partials"
+        if execution.get("upstream_control"):
+            tile += "; S2 upstream=" + execution["upstream_control"]["status"]
         lines.append(f"| {result['case']['name']} | {result['status']} | {tile} | {stats.get('median_us', '—')} | "
                      f"{stats.get('p95_us', '—')} | {stats.get('samples', '—')} |")
     for result in report["results"]:

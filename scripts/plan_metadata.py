@@ -135,6 +135,7 @@ def validate_execution(plan, case):
         if plan['tasks'] != (b+7)//8 or 'matmul' in plan or 'reduction' in plan:
             raise ValueError('small tasks or unexpected Matmul metadata')
     validate_reduction_expansion(plan, case)
+    validate_upstream_control(plan)
     return plan
 
 
@@ -256,3 +257,37 @@ def validate_reduction_expansion(plan, case):
             raise ValueError('invalid or non-compressing reduction expansion')
     elif trace['baseline_mode'] != reduction['mode'] or trace['baseline_score'] != selection['score']:
         raise ValueError('unchanged reduction disagrees with baseline trace')
+
+
+def validate_upstream_control(plan):
+    """R17 pins only the upstream family/tile, retaining R16's reduction mode."""
+    if 'upstream_control' not in plan:
+        return  # Historical reports and disabled/explicit controls.
+    trace = plan['upstream_control']
+    selection = plan.get('selection') or {}
+    if (not isinstance(trace,dict) or type(trace.get('version')) is not int or trace['version'] != 1 or
+        trace.get('status') not in ('selected','sdk_rejected') or plan['family'] == 'small' or
+        plan['requested_family'] != 'auto' or plan.get('requested_sum','auto') != 'auto' or
+        selection.get('planner_version') != 3 or
+        trace.get('reference_family') not in ('gm','stream','pipeline') or
+        trace.get('reference_reduction') not in ('rows','partials') or
+        type(trace.get('reference_score')) not in (int,float) or
+        not math.isfinite(trace['reference_score']) or trace['reference_score'] <= 0):
+        raise ValueError('invalid upstream control trace')
+    for key in ('reference_tile_m','reference_tile_n'):
+        if type(trace.get(key)) is not int or not 16 <= trace[key] <= 256 or trace[key] % 16:
+            raise ValueError('invalid upstream reference tile')
+    actual = plan['matmul'] if plan['family'] == 'gm' else plan['stream']
+    if (plan['family'] == 'gm' and actual['policy'] != 'auto') or not isinstance(plan.get('reduction'),dict):
+        raise ValueError('upstream control conflicts with explicit or legacy plan')
+    if trace['reference_reduction'] != plan['reduction']['mode']:
+        raise ValueError('upstream control changed reduction mode')
+    if trace['status'] == 'selected':
+        if (plan['family'] != 'gm' or (actual['tile_m'],actual['tile_n']) != (32,64) or
+            'reduction_expansion' in plan):
+            raise ValueError('S2 selection does not describe fixed GM upstream')
+    elif (trace['reference_family'] != plan['family'] or trace['reference_tile_m'] != actual['tile_m'] or
+          trace['reference_tile_n'] != actual['tile_n'] or trace['reference_score'] != selection['score'] or
+          (trace['reference_tile_m'],trace['reference_tile_n']) == (32,64) or
+          'reduction_expansion' not in plan):
+        raise ValueError('SDK rejection did not retain the R16 reference plan')

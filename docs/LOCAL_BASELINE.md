@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R16 受控覆盖版，此前 74 项主机检查通过，未在本机做 CANN/NPU 测试。现收到 S12 的 15/15 Pass、全部错误占比 0.00%，按对话关联 `2d7a9b9`；较 R15/S11 未见明显新增性能收益，平台源码哈希未核验，通过不代表所有路径均已命中。保留此前各轮对照。最新机制见 [流式融合与异步流水](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。按开发决策，下面 NPU 命令仅作为可选工具，不是当前提交前置步骤。
+当前源码为 R17 S2 上游对照候选，等待 S13，尚无本轮线上结论，未做本地 CANN/NPU 测试。最新反馈仍为 R16/S12 的 15/15 Pass，不能沿用为 R17 的通过记录。已有 R16 的线上文件只需替换 `kernel.asc`。最新机制见 [流式融合与对照](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。按开发决策，下面 NPU 命令仅是可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -117,7 +117,11 @@ bash scripts/run_local.sh --generate-only --suite full
 
 默认先按原规则分派 Small，其余按 R15 联合选择 GM/Stream/Pipeline、tile、N 分片和 Rows/Partials。R16 在 SDK 接受后仅对 unrestricted Auto 的 Rows 执行受控扩围，固定上游计划。Stream/Pipeline/Small 不产生完整 similarity，报告相应标记不可回读。`CANN_EXECUTION_FAMILY=gm|small|stream|pipeline|auto` 仅在本地 runner 使用，线上入口不读取环境变量。强制 small 遇到不支持的尺寸/布局会明确报错；与固定 `CANN_MATMUL_TILE` 冲突也报错。固定 tile + auto 走 GM；tile sweep 自动强制 GM。
 
-`CANN_SUM_MODE=auto|r15|rows|partials` 仅用于本地求和对照。auto 默认启用 R16 的后置扩围；r15 关闭扩围并保持原 Auto 与 Small 准入。显式 rows/partials 跳过 Small，与强制 small 冲突时报错。sum=auto 时强制 gm/stream 保留旧 Rows 行为；强制 pipeline 比较两种归约。固定 tile + auto family 默认 Rows，但可显式选 partials；tile sweep 继承 sum 设置。报告 schema 3 扩展 `requested_sum`、`reduction`（段长/段数、字节数和 UB），联合模型为 v3 / `joint-work-v2`，历史无新字段的报告继续按旧 Rows 校验。源码快照包含九个提交文件。新增 `reduction_expansion` v1 记录是否启用/实际扩围、原模式和原成本；最终成本在 `selection.score`，即使大于原模型成本也如实记录。R16 的线上复制仅需替换 `kernel.asc`、`joint_plan.h`。
+`CANN_SUM_MODE=auto|r15|rows|partials` 仅用于本地求和对照。auto 默认先运行 R16 的后置扩围，再依源码开关尝试 R17 上游对照；r15 同时跳过扩围和 R17 控制，保持原 Auto 与 Small 准入。显式 rows/partials 跳过 Small，与强制 small 冲突时报错。sum=auto 时强制 gm/stream 保留旧 Rows 行为；强制 pipeline 比较两种归约。固定 tile + auto family 默认 Rows，但可显式选 partials；tile sweep 继承 sum 设置。报告 schema 3 扩展 `requested_sum`、`reduction`（段长/段数、字节数和 UB），联合模型为 v3 / `joint-work-v2`，历史无新字段的报告继续按旧 Rows 校验。源码快照包含九个提交文件。新增 `reduction_expansion` v1 记录是否启用/实际扩围、原模式和原成本；最终成本在 `selection.score`，即使大于原模型成本也如实记录。R16 的线上复制仅需替换 `kernel.asc`、`joint_plan.h`。
+
+R17 只替换 `kernel.asc`：`S2_UPSTREAM_CONTROL = true` 默认使通用 Auto 使用 GM＋32×64，保持 R16 选定的归约模式；设为 `false` 即恢复 R16，同一开关影响线上和本地默认调用。显式 family/tile/sum 控制不受影响。需要 R16 对照时修改这个源码开关并重新构建，不能用 `CANN_SUM_MODE=r15` 代替（后者还关闭 R16 扩围）。
+
+报告新增 `upstream_control` v1，记录 selected/sdk_rejected 与参考 R16 的 family/tile/reduction/score。selected 使用 GM 32 行分段并省略旧上游的 `reduction_expansion`；sdk_rejected 保留原真实 trace。参考分数与实际 `selection.score` 分别记录，不代表微秒。源码哈希包含这个开关，历史无新字段的报告仍可解析。
 
 `execution_plan.json` schema 3 记录实际算法族、变体、任务/核数、输入身份和资源；GM 继续输出旧 `matmul_plan.json`。small 的 `similarity_available=false` 表示核内直接产出 y，没有中间矩阵回读；最终输出精度、重复一致性、输入不变和 guard 检查仍保留。
 
