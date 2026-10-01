@@ -12,6 +12,8 @@
 - [x] Task 2: add failing checked device-helper tests; implement compensated record writer/finalizer, integrate GM and Stream owners. Verify strong cancellation, record uniqueness, no producer scalar reads and existing async slot contract.
 - [x] Task 3: integrate host launch args/allocation, local CANN_SUM_MODE, schema-3 extension and source snapshots. Test actual dispatch/writer, historical/new report validation and explicit request failures.
 - [x] Task 4: complete host suite and fresh independent whole-change review; fix material findings.
-- [ ] Task 5: archive R15 mechanism, pending S11 hypotheses and submission hashes; commit, integrate and push authorized main.
+- [x] Task 5: archive R15 mechanism, pending S11 hypotheses and submission hashes; commit, integrate and push authorized main.
 
 Verification: 72/72 host tests passed in 68.063 s; 640-problem pinned R14 Rows comparison identical; shell syntax, whitespace and nine source hashes verified. Independent review found no substantive issues. CANN/NPU/online validation NOT_RUN for R15.
+
+Release: implementation 5e27c5a fast-forwarded to main and pushed to origin/main. Submission hashes and pending S11 are archived in ITERATION_LOG.md.

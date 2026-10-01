@@ -34,7 +34,7 @@
 | R12 2026-09-30 向量补偿 Sum | `b864c51` | 最后 M 维求和改为补偿树，1024 行压缩为最多 8 对主值/残差，再做标量补偿合并 | 62 项主机检查通过；S8 线上 15/15 通过，点 13 快 5.73 倍、8–12 明显改善；5/6 变慢，未做本地 NPU 测试 |
 | R13 2026-09-30 流式融合 | `1dc4138`，发布 `9b386ec` | 按行块拥有任务、规则生成 N 分片、每核有界 C 槽、逐块 Max；保留 R12 Sum/Small | 66 项主机检查通过；S9 线上 15/15 通过，点 14 约快 2 倍，8–12 变慢；未做本地 CANN/NPU 测试 |
 | R14 2026-10-01 联合规划与流水 | `65f7817` | 联合比较 GM/Stream/Pipeline、tile 与 N 分片；双 GM C 槽重叠下一块 Cube 与上一块 Max | 68 项主机检查通过；S10 线上 15/15 通过，13 点快、2 点慢；点 10/12 较 S8 仍快 14.98%/12.69%，未做本地 CANN/NPU 测试 |
-| R15 2026-10-01 Max→Sum 部分和 | 本轮提交，源码哈希见文末 | 完整行 Max owner 直接生成 64B 补偿记录；联合选择 Rows/Partials，缩短最终求和 | 72 项主机检查通过；未做本地 CANN/NPU 测试，等待 S11 |
+| R15 2026-10-01 Max→Sum 部分和 | `5e27c5a` | 完整行 Max owner 直接生成 64B 补偿记录；联合选择 Rows/Partials，缩短最终求和 | 72 项主机检查通过；未做本地 CANN/NPU 测试，等待 S11 |
 
 R3 的 `2e079f8` 和 `d01d01b` 对应相同 kernel；后者主要补充性能工具。R4 之后经历了 R5 再到 R7，**S2→S3 是跨版本累计对比，不能把全部收益归因于 R7 的评分公式**。
 
@@ -531,7 +531,7 @@ R14 提交源码 SHA256（共七个同目录文件）：
 
 ## R15：Max owner 生成补偿部分和（待 S11）
 
-以 R14/S10 为直接基线。本轮将 Max→Sum 的接口从整条行 Max 改为可选的 64B 补偿记录，覆盖 GM、Stream 和 Pipeline：完整 N Max owner 对 M 段执行向量 TwoSum 树，保留 8 个主值与 8 个补偿值；最终 batch owner 只合并记录。S>1 仍先逐行合并 N 分片 Max。没有新增 kernel launch；Small 及 R14 异步槽复用协议保留。
+实现提交 `5e27c5a`，已同步 GitHub main；以 R14/S10 为直接基线。本轮将 Max→Sum 的接口从整条行 Max 改为可选的 64B 补偿记录，覆盖 GM、Stream 和 Pipeline：完整 N Max owner 对 M 段执行向量 TwoSum 树，保留 8 个主值与 8 个补偿值；最终 batch owner 只合并记录。S>1 仍先逐行合并 N 分片 Max。没有新增 kernel launch；Small 及 R14 异步槽复用协议保留。
 
 `joint_plan.h` 同时比较 Rows/Partials 的 producer 和最终归约工作，可能连带改变 family/tile/分片。保留原 R12 Rows 算法及 R14 的 Rows 评分；新结构模型仍未经硬件时间校准。新增 `reduction_plan.h`、`partial_sum.asc`，本地 `CANN_SUM_MODE`、实际计划和源码快照同步更新；线上不读取该环境变量。机制与局限见 [R15 跨阶段融合](STREAMING_FUSION.md#r15max-owner-生成补偿部分和2026-10-01)。
 
