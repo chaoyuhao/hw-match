@@ -26,13 +26,15 @@ struct CpuIterate {
  template<bool Sync>void GetTensorC(AscendC::LocalTensor<float> c,uint8_t atomic,bool sequential){
   using namespace AscendC;
   require(Sync && active && ready && !atomic && sequential,"invalid local C contract");
-  // Poison every unspecified element. Padding must NEVER participate in Max.
+  // CANN 9.0 CopyOutNZ2ND uses current baseWidth for sequential ND stride.
+  // MatmulClient::CopyToUB copies it flat (no per-row padding for ND).
+  // Poison the unwritten suffix; the old baseN-stride double hid tail bugs.
   for(unsigned i=0;i<bm*bn;++i)c.SetValue(i,std::numeric_limits<float>::quiet_NaN());
   unsigned row=(round%((rows+bm-1)/bm))*bm,col=(round/((rows+bm-1)/bm))*bn;
   for(unsigned r=0;r<std::min(bm,rows-row);++r)for(unsigned j=0;j<std::min(bn,cols-col);++j){
    float sum=0;
    for(unsigned q=0;q<k;++q)sum+=readGm(a.data+(ta?q*m+row+r:(row+r)*k+q))*readGm(b.data+(tb?(col+j)*k+q:q*n+col+j));
-   c.SetValue(r*bn+j,sum);
+   c.SetValue(r*std::min(bn,cols-col)+j,sum);
   }
   ready=false;++round;++tiles;
  }
@@ -98,12 +100,12 @@ void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t t
 template<bool TA,bool TB>void layouts(){
  for(uint32_t buffers:{1u})for(bool records:{false,true}){
  for(uint32_t tileM:{16u,64u,256u})for(uint32_t tileN:{16u,64u,256u})for(uint32_t edge:{0u,1u}){
-  auto m=tileM+edge,n=tileN*2+edge;
+  auto m=tileM+edge,n=tileN*2+edge*8;
   for(uint32_t splits:{1u,2u}) check<TA,TB>(3,m,n,7,tileM,tileN,3,splits,edge,buffers,records);
  }
- check<TA,TB>(9,17,33,257,16,16,24,2,0,buffers,records);
+ check<TA,TB>(9,17,40,257,16,16,24,2,0,buffers,records);
  check<TA,TB>(1,2,32,2,16,16,24,2,3,buffers,records);
- check<TA,TB>(2,1027,1,1,256,16,3,1,4,buffers,records);
- check<TA,TB>(1,1,1,1,16,16,24,1,2,buffers,records);
+ check<TA,TB>(2,1027,8,1,256,16,3,1,4,buffers,records);
+ check<TA,TB>(1,1,8,1,16,16,24,1,2,buffers,records);
 }}
 int main(){layouts<false,false>();layouts<false,true>();layouts<true,false>();layouts<true,true>();}

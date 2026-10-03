@@ -312,7 +312,7 @@ def validate_matmul_max_fusion(plan, case):
             raise ValueError('missing fusion trace')
         return
     if (not isinstance(trace,dict) or type(trace.get('version')) is not int or trace['version'] != 1 or
-        trace.get('status') not in ('selected','sdk_rejected') or plan['requested_family'] != 'auto' or
+        trace.get('status') not in ('selected','sdk_rejected','layout_rejected') or plan['requested_family'] != 'auto' or
         plan.get('requested_sum') != 'auto' or 'upstream_control' in plan or plan['family'] == 'small' or
         trace.get('reference_family') not in ('gm','stream','pipeline') or
         trace.get('reference_reduction') != plan['reduction']['mode'] or
@@ -331,13 +331,18 @@ def validate_matmul_max_fusion(plan, case):
         raise ValueError('invalid reference shards')
     if iterative != (trace['status'] == 'selected'):
         raise ValueError('fusion status mismatch')
+    if trace['status'] == 'layout_rejected' and case['n'] % 8 == 0:
+        raise ValueError('layout rejection requires unaligned ND rows')
     if iterative:
         meta = plan.get('iterate')
         splits = actual['splits']
         rows = case['b']*((case['m']+tm-1)//tm)
         expected_splits = rs or min(grid,(plan['available_cores']+rows-1)//rows)
         width = max(min(case['n'],grid*(shard+1)//splits*tn)-grid*shard//splits*tn for shard in range(splits))
-        expected = dict(version=1,c_position='vecin',traverse='first_m',max_columns=width,
+        version = meta.get('version') if isinstance(meta,dict) else None
+        if version not in (1,2) or (version == 2 and case['n'] % 8):
+            raise ValueError('unsupported ND tail layout contract')
+        expected = dict(version=version,c_position='vecin',traverse='first_m',max_columns=width,
                         c_tile_bytes=actual['inner_tile']['m']*actual['inner_tile']['n']*4,sessions=plan['tasks'])
         if (not isinstance(meta,dict) or meta != expected or any(type(meta[key]) is not int for key in ('version','max_columns','c_tile_bytes','sessions')) or
             splits != expected_splits or 'selection' in plan or 'reduction_expansion' in plan):

@@ -178,6 +178,7 @@ void s2Control(){
  // Exercise the same default argument used by the online entry and local runner.
  auto configured=invokeS2(p,false,true);
  assert(configured.s2Attempted==S2_UPSTREAM_CONTROL);
+ if(!ITERATE_MATMUL_MAX)assert(!configured.fusionAttempted && !configured.isIterate);
  if(S2_UPSTREAM_CONTROL)assert(configured.s2Selected && !configured.isStream && configured.plan.tileM==32 && configured.plan.tileN==64);
  std::cout<<ExecutionJson(configured,p,"auto","auto")<<'\n';
  run(1,1,1,32,false,false,ExecutionFamily::Auto,true,false,{},1,ReductionPolicy::Auto,true,true);
@@ -208,7 +209,7 @@ local_baseline::ExecutionInfo invokeFusion(const local_baseline::ProblemDesc& p)
 void fusionControl(){
  using namespace local_baseline;
  for(unsigned dtype:{1u,2u})for(bool ta:{false,true})for(bool tb:{false,true})
- for(auto dims:{std::array<unsigned,4>{1,17,65,32},std::array<unsigned,4>{3,33,129,65},std::array<unsigned,4>{192,1024,1024,256},std::array<unsigned,4>{1,8192,16,32}}){
+ for(auto dims:{std::array<unsigned,4>{1,17,72,32},std::array<unsigned,4>{3,33,136,65},std::array<unsigned,4>{192,1024,1024,256},std::array<unsigned,4>{1,8192,16,32}}){
    ProblemDesc p{dims[0],dims[1],dims[2],dims[3],dtype,ta,tb};
    const auto old=invokeS2(p,false);const auto fused=invokeFusion(p);
    assert(fused.isIterate && fused.isStream && fused.fusionAttempted && !fused.expansionTracked && !fused.executionPlanner);
@@ -217,6 +218,15 @@ void fusionControl(){
    assert(scratchBytes==fused.stream.scratchBytes && !fused.stream.cSlotElements && !fused.stream.maximaOffset);
    assert(fusionTilings==1 && fused.tiling.baseM==int(fused.iterative.baseM) && fused.tiling.baseN==int(fused.iterative.baseN));
    std::cout<<ExecutionJson(fused,p,"auto","auto")<<'\n';
+ }
+ // Unaligned ND rows cannot use WholeReduceMax's 32-byte row stride.
+ for(unsigned n:{1u,7u,17u,65u})for(unsigned dtype:{1u,2u})for(bool ta:{false,true})for(bool tb:{false,true}){
+  ProblemDesc tail{3,33,n,65,dtype,ta,tb};const auto reference=invokeS2(tail,false);const auto bytes=scratchBytes;
+  const auto rejected=invokeFusion(tail);
+  assert(rejected.fusionAttempted && rejected.fusionLayoutRejected && !rejected.isIterate && fusionTilings==0);
+  assert(rejected.isStream==reference.isStream && rejected.stream.splits==reference.stream.splits && rejected.stream.buffers==reference.stream.buffers);
+  assert(scratchBytes==bytes && rejected.tiling.baseN==reference.tiling.baseN && rejected.executionScore==reference.executionScore);
+  std::cout<<ExecutionJson(rejected,tail,"auto","auto")<<'\n';
  }
  ProblemDesc p{192,1024,1024,256,1,false,false};const auto old=invokeS2(p,false);const auto oldScratch=scratchBytes;
  for(rejectFusion=1;rejectFusion<=7;++rejectFusion){
@@ -300,7 +310,7 @@ int main(){using local_baseline::ExecutionFamily;using local_baseline::Reduction
             done=subprocess.run([str(binary)],capture_output=True,text=True)
             self.assertEqual(done.returncode,0,done.stderr)
             rows=[json.loads(line) for line in done.stdout.splitlines()]
-            self.assertEqual(len(rows),159)
+            self.assertEqual(len(rows),191)
             self.assertTrue(any(row.get('upstream_control',{}).get('status')=='selected' and
                                 (row['upstream_control']['reference_tile_m'],row['upstream_control']['reference_tile_n'])==(32,64)
                                 for row in rows))
@@ -309,10 +319,20 @@ int main(){using local_baseline::ExecutionFamily;using local_baseline::Reduction
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)
 
             fused=next(row for row in rows if row['family']=='iterate')
+            self.assertEqual(fused['iterate']['version'],2)
+            historical=json.loads(json.dumps(fused));historical['iterate']['version']=1
+            self.assertEqual(plan_metadata.validate_execution(historical,historical['problem']),historical)
+            unaligned=dict(fused['problem'],n=fused['problem']['n']-1)
+            with self.assertRaisesRegex(ValueError,'unsupported ND tail layout contract'):
+                plan_metadata.validate_matmul_max_fusion(fused,unaligned)
+            sdk_rejected=next(row for row in rows if row.get('matmul_max_fusion',{}).get('status')=='sdk_rejected')
+            bad=json.loads(json.dumps(sdk_rejected));bad['matmul_max_fusion']['status']='layout_rejected'
+            with self.assertRaisesRegex(ValueError,'layout rejection requires unaligned ND rows'):
+                plan_metadata.validate_execution(bad,bad['problem'])
             for section, fields in [('stream',dict(c_slot_elements=32)),('stream',dict(maxima_offset=4)),
                                     ('stream',dict(ub_used=fused['stream']['ub_used']+32)),
                                     ('stream',dict(partial_offset=fused['stream']['partial_offset']+32)),
-                                    ('iterate',dict(version=True)),('iterate',dict(c_position='gm')),
+                                    ('iterate',dict(version=True)),('iterate',dict(version=3)),('iterate',dict(c_position='gm')),
                                     ('iterate',dict(max_columns=0)),('iterate',dict(sessions=1)),
                                     ('matmul_max_fusion',dict(status='sdk_rejected')),
                                     ('matmul_max_fusion',dict(reference_score=0)),

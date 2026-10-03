@@ -1,6 +1,6 @@
 # 跨阶段融合：Matmul → Max → Sum
 
-当前源码为 R18，最新机制与复制清单见文末。以下 R13/R14/R15/R16 段落保留为 S9/S10/S11/S12 的历史解释；各段“默认”指当时版本。
+当前源码为 R19，最新修复与复制清单见文末。以下 R13–R18 段落保留为历史解释；各段“默认”指当时版本。R18 已收 S14：三个 Wrong Answer，R19 默认恢复 R16。
 
 R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥有一个 C 临时槽，一个任务拥有 `(batch, M 行块, N 分片)`，遍历分片内所有 N 块。每块沿完整 K 做 Matmul，立即在 Vector 上更新该任务的行最大值，再复用 C 槽。最终 Sum 沿用 R12 的补偿树，Small 的算法和自动门槛不变。
 
@@ -156,6 +156,8 @@ S13：点 15 109.31→76.16 μs（-30.33%），接近 S2 76.91 μs；点 8–14 
 
 ## R18：连续 Matmul→Max（2026-10-01）
 
+**后续更正（S14/R19）：此节是提交前设计记录，旧代码误将紧凑 ND 尾块行距视为 baseN；仅屏蔽无效列不能保证寻址正确。下节记录修复与证据，R18 的 CPU 通过记录不能继续作为尾块正确性的依据。**
+
 新入口保留 R16 自动选择作为参考，默认关闭 R17 的 S2 固定对照。Small 准入和设备计算不变；其余默认 Auto 在 SDK 接受后进入 `iterate`，显式 family/tile/sum、r15 和 S2 对照仍走原实现。
 
 ```text
@@ -177,3 +179,42 @@ Host 使用 VECIN C、FIRSTM 和 `SetFixSplit`，内部 C 至多 32 KiB，实际
 本地 `CANN_MATMUL_MAX=auto|r16` 用于可选诊断；线上不读取。新报告 `family=iterate` / `variant=mix_iterate`，stream planner v4 将 C scratch 容量/起点置零，增加实际 UB C 容量、最大会话宽度、会话数及 R16 参考。旧性能评分不冒充新路径预测。历史 schema 3 报告继续可读。
 
 **已有 R16/R17：替换 kernel.asc，新增 iterate_plan.h、iterate_matmul.asc**，其他八个依赖保留。76/76 主机检查通过；无本地 CANN/NPU、无线上的本轮结果。完整哈希和比较基线见 [R18 归档](ITERATION_LOG.md#r18连续-matmulmax2026-10-01)。
+
+## R19：ND 尾块契约修正与默认回退（2026-10-03）
+
+S14 的点 3/6/8 均 WA100%，且通过点 10/12 相对 S12 大幅变慢。因此先将连续路径关闭，默认恢复 R16 自动方案，S2 对照保持关闭；修复后的连续路径保留为实验，尚无新线上结果。既有 R18 的提交只需更新 `kernel.asc` 和 `iterate_matmul.asc`，其余九个依赖不变，不制作提交包。
+
+### 已复现的代码缺陷
+
+`GetTensorC<true>(LocalTensor, 0, true)` 的 sequential ND 输出按当前 tile 的实际列宽紧凑排列。旧实现按 `baseN` 定位下一行；当尾块宽度小于 `baseN` 时，从第二行起即可读到错误位置。旧 CPU 替身也按 `baseN` 写出，恰好隐藏了同一错误。这是我们对生产者/消费者布局契约及测试替身的共同误判。
+
+以 baseN=16、尾块实际宽度=8 为例，第二行应从第 8 个 float 开始，旧代码却从第 16 个开始。把 CPU 替身改成紧凑布局并将未写尾部置为 NaN 后，旧生产代码触发 `masked reduction read invalid/uninitialized lane`；修正 `ConsumeLocalC` 的行距为 `validCols` 后通过。这证明了具体缺陷，不证明未知 shape 的三个线上点都由它单独导致。
+
+WholeReduceMax 的行重复步长按 32 字节计，FP32 因而要求行宽为 8 的倍数。当前外层 tileN 与 SDK 接受的 baseN 均 16 对齐；准入 N%8==0 可保证所有分片及内部尾块的行距合法。不满足时在新的 SDK tiling 前返回完整 R16 计划。此筛选是指令合法性条件，不是性能阈值；后续若支持任意宽度，需要单独实现布局转换或其他消费方式，不能只去掉条件。
+
+### 官方源码依据
+
+核对官方 `cann/asc-devkit` 的 **9.0.0 tag**，只用公开接口，未把 SDK 内部文件加入提交依赖：
+
+| 官方源文件 | 核对内容 | 下载内容 SHA-256 |
+| --- | --- | --- |
+| [n_loop_norm_base.h](https://raw.gitcode.com/cann/asc-devkit/raw/9.0.0/impl/adv_api/detail/matmul/scheduler/iterator/n_loop/n_loop_norm_base.h) | `UpdateInnerParams` 尾轮使用 `tailBaseShape_`，不是固定 baseN | `2a398c917a8507a5c132ca4ddb31026dc4e760d4328691ef86199f03eb2fb1f0` |
+| [copy_cube_out_fixpipe.h](https://raw.gitcode.com/cann/asc-devkit/raw/9.0.0/impl/adv_api/detail/matmul/stage/copy_cube_out/copy_cube_out_fixpipe.h) | `CopyOutNZ2ND` 的 sequential 分支用 `baseWidth` 作目的行距 | `400344586a5a57bde7d80df8d2b74068d8df9f510958aed8aaa6aafa5b71b95d` |
+| [matmul_client.h](https://raw.gitcode.com/cann/asc-devkit/raw/9.0.0/include/adv_api/matmul/matmul_client.h) | Cube/Vector 分离实现的同步 LocalTensor `GetTensorC` 经 GM workspace；`CopyToUB` 普通 ND 分支平坦拷贝，不恢复 baseN 行填充 | `70b5067fe70e2ec42e7ac4f708ce6a0a991e91c1d605e539986123471f45b5bb` |
+
+公开 tag 与线上实际 SDK 二进制未逐一核验，线上卡型仍未知。不把这里的分离实现推论为所有硬件的物理路径，也不把 VECIN API 视为已绕过 GM。ND_ALIGN 的搬运契约不同，未作为未经验证的替换方案。
+
+### 验证范围与剩余跨模块机会
+
+主机全套 76/76 通过（74.986 秒）。实际设备 helper 在 CPU 指令替身下检查 320 组：包含 8 列紧凑尾块、多 M/N 块、四转置、分片后 Max、Rows/Partials、负数/零/抵消及资源所有权。真实 host 分派在两种 S2 配置下各校验 191 条 JSON，其中新增 32 组非对齐宽度回退；检查单次 launch、保留原 scratch/计划、SDK 拒绝和默认开关。元数据 v2 校验对齐条件，v1 历史兼容。未做本地 CANN 编译/NPU 测试，R19 未提交线上。
+
+跨模块优化没有做完，R18 也不能算已成功完成 Matmul→Max：
+
+| 剩余机会 | 当前源码边界 | 下一步优先级与约束 |
+| --- | --- | --- |
+| 连续产出与异步消费结合 | R18 同步 GetTensorC、单 UB 块，替代了旧 Pipeline 的双槽重叠；不能把少 End 等同于更快 | 正确性之后优先；保留 R16 Pipeline 对照，先证明真实 API 所有权及同步契约，再尝试重叠 |
+| 按实际内部块选择整个执行方案 | R18 是先选 R16 再转换，没有把连续族的内块、交接次数、等待和 owner 并行度一起重新排序 | 高；SDK 接受仅说明配置可用，不是低延迟证明。避免所有通用输入无条件转换 |
+| 完整 batch 的 owner 直接收尾 | 通用路径即使单 owner 拥有一个 batch，也仍经 GM 记录和全核屏障交给最后一级 Sum | 在有足够 batch 并行度时有价值；多 owner/跨 N 分片仍必须先正确合并 Max，不能各片先 Sum |
+| 各阶段复用 UB 与扩大块 | 当前不同阶段的缓冲预算/分配未统一按生命周期复用 | 后续；需要证明旧 DMA/Vector/Matmul 引用全部结束后才复用，不能只把预算数字放宽 |
+
+本轮只修复可复现缺陷并隔离失败实验，不同时引入上述性能改动。S14 未定位出哪项等待或布局对应哪一个隐藏点，也没有证明点 15 的具体输入或执行路径。

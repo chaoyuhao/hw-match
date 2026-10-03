@@ -128,6 +128,8 @@ R17 只替换 `kernel.asc`：`S2_UPSTREAM_CONTROL = true` 默认使通用 Auto �
 `--suite small` 用规则生成各维边界并交叉两 dtype/四布局，包含命中和回退，不代表线上点的真实 shape。CPU 替身只能检查地址和逻辑，不能证明 CANN 指令/流水/舍入行为。本轮按用户要求直接等待线上结果，不安排额外 NPU 采样。
 
 
-### R18 连续 Matmul→Max
+### R18 / R19 连续 Matmul→Max 实验
 
-默认 Auto 尝试连续 Iterate/VECIN 消费；`CANN_MATMUL_MAX=r16` 可关闭它做旧自动方案对照（源码 S2 开关默认 false）。显式 family/tile/sum 和 sum=r15 保持原控制；无须为了本轮安排本地 NPU 测试。报告 `family=iterate`，没有完整 similarity；来源哈希包含新 `iterate_plan.h` 和 `iterate_matmul.asc`。线上只复制提交源码，不读取这个环境变量。资源和接口边界见 [R18](STREAMING_FUSION.md#r18连续-matmulmax2026-10-01)。
+R18 曾默认开启连续 Iterate/VECIN 消费，S14 出现三个 Wrong Answer。**R19 默认 `ITERATE_MATMUL_MAX=false`、`S2_UPSTREAM_CONTROL=false`，Auto 恢复 R16**。`CANN_MATMUL_MAX=auto` 尊重源码开关，不会重新开启实验；`r16` 始终关闭它。若后续需要单独提交修复后的实验，必须明确将源码开关设为 true 并重新构建，此时只接收 N%8==0 的 ND 行宽，其余保留 R16；未验证其线上正确性和收益。
+
+实验报告仍为 `family=iterate`，增加 `iterate.version=2` 标识修正后的尾块契约，`matmul_max_fusion.status=layout_rejected` 记录对齐回退。v1 历史报告仍可读取，不代表旧结果正确。显式 family/tile/sum 和 sum=r15 保持原控制；来源哈希包含全部 11 个提交文件。线上不读取上述本地环境变量，不安排额外 NPU 前置测试。证据和限制见 [R19](STREAMING_FUSION.md#r19nd-尾块契约修正与默认回退2026-10-03)。
