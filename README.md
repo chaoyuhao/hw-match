@@ -1,10 +1,10 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 **S14 / R18：12/15 通过，点 3、6、8 Wrong Answer，错误占比均 100%**；点 10、12 虽通过，但耗时分别为 R16/S12 的 3.74、2.75 倍。版本按对话关联，平台源码哈希未核验；错误点的时间不计作性能收益。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 **S15 / R19 默认配置：15/15 通过，错误占比均 0.00%**。关闭连续实验后性能回到 R16 水平；与 S12 相比，除点 1/13 外均在 ±2.23% 内。点 15 仍为 110.89 μs，历史退化未解决。版本按对话关联，平台源码/开关哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R19：修正 ND 尾块行距，默认恢复 R16**。`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`，保留 Small 和 R16 自动执行方案。实验路径按当前尾块列宽读取紧凑 ND 输出，非 32 字节对齐行宽回退 R16；已用更正后的 CPU 替身复现旧错误并通过修复回归。**76 项主机检查通过，R19 尚无线上结果**，不能据此保证 S14 三个错误点均已解决。已有 R18 时替换 **kernel.asc、iterate_matmul.asc**，其余提交依赖不变。依据和限制见 [R19 修复记录](docs/STREAMING_FUSION.md#r19nd-尾块契约修正与默认回退2026-10-03)。
+当前源码版本 **R19：修正 ND 尾块行距，默认恢复 R16**。`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`，保留 Small 和 R16 自动执行方案。实验路径按当前尾块列宽读取紧凑 ND 输出，非 32 字节对齐行宽回退 R16；已用更正后的 CPU 替身复现旧错误并通过修复回归。**76 项主机检查通过；S15 默认回退配置线上 15/15 Pass**。修复后的连续路径仍关闭，尚无线上的精度和性能验证。已有 R18 时替换 **kernel.asc、iterate_matmul.asc**，其余提交依赖不变。依据和限制见 [R19 修复记录](docs/STREAMING_FUSION.md#r19nd-尾块契约修正与默认回退2026-10-03)。
 
 线上硬件型号仍未确认：910B2C 是本地设备；原始模板默认编译目标 `dav-2201`，允许 `NPU_ARCH` 覆盖，这不能证明线上实际卡型。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
 
