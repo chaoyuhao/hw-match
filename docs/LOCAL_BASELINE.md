@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R20 跨任务 Pipeline 版；S2 与 Iterate 实验均关闭，`stream_plan.h` 中 `PIPELINE_CHAIN_TASKS=true` 延续同一核上的双槽流水。已有 R19 的线上文件只需替换 `stream_plan.h`、`stream_matmul.asc`。S15 的 15/15 Pass 对应 R19，R20 尚无线上结果。最新机制见 [流式融合与对照](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。下面 NPU 命令仅是可选工具，不是当前提交前置步骤。
+当前源码为 R20 跨任务 Pipeline 版；S2 与 Iterate 实验均关闭，`stream_plan.h` 中 `PIPELINE_CHAIN_TASKS=true` 延续同一核上的双槽流水。已有 R19 的线上文件只需替换 `stream_plan.h`、`stream_matmul.asc`。最新 S16 的 15/15 Pass 按对话关联 R20，平台源码哈希未核验；与 S15 比较 5 点快、10 点慢，稳定性能收益尚未确认。最新机制见 [流式融合与对照](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。下面 NPU 命令仅是可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 

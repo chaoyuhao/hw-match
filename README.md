@@ -1,10 +1,10 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 **S15 / R19 默认配置：15/15 通过，错误占比均 0.00%**。关闭连续实验后性能回到 R16 水平；与 S12 相比，除点 1/13 外均在 ±2.23% 内。点 15 仍为 110.89 μs，历史退化未解决。版本按对话关联，平台源码/开关哈希未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 **S16 / R20 默认配置：15/15 通过，错误占比均 0.00%**。用户反馈分数微涨，未提供具体分数；与 S15 相比自身耗时 5 点变快、10 点变慢，尚未确认稳定提速。点 15 为 114.03 μs，历史退化未解决。版本按对话关联，平台源码/开关哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R20：跨任务延续双槽 Pipeline**。默认 `PIPELINE_CHAIN_TASKS=true`，在上一任务最后的 Max/补偿记录完成前，预提交同一核下一任务的首块 Matmul。保留 R16 的候选选择与数据布局，`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`。**76 项主机检查通过，R20 尚无线上结果**；S15 是 R19 的通过记录。已有 R19 时只需替换 **stream_plan.h、stream_matmul.asc**，其余九个提交文件不变。机制和开关见 [R20](docs/STREAMING_FUSION.md#r20跨任务延续双槽-pipeline2026-10-03)。
+当前源码版本 **R20：跨任务延续双槽 Pipeline**。默认 `PIPELINE_CHAIN_TASKS=true`，在上一任务最后的 Max/补偿记录完成前，预提交同一核下一任务的首块 Matmul。保留 R16 的候选选择与数据布局，`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`。**提交前 76 项主机检查通过，S16 线上 15/15 Pass**；本轮跨任务流水的性能收益尚未确认，连续 Iterate 实验仍未线上验证。已有 R19 时只需替换 **stream_plan.h、stream_matmul.asc**，其余九个提交文件不变。机制和开关见 [R20](docs/STREAMING_FUSION.md#r20跨任务延续双槽-pipeline2026-10-03)。
 
 线上硬件型号仍未确认：910B2C 是本地设备；原始模板默认编译目标 `dav-2201`，允许 `NPU_ARCH` 覆盖，这不能证明线上实际卡型。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
 
