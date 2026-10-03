@@ -1,6 +1,6 @@
 # 跨阶段融合：Matmul → Max → Sum
 
-当前源码为 R20，最新流水改动与复制清单见文末。以下 R13–R19 段落保留为历史解释；各段“默认”指当时版本。最新 S16 对应 R20，15/15 Pass；较 S15 自身耗时 5 点快、10 点慢，跨任务流水尚未确认稳定提速。用户反馈分数微涨，数值未提供；Iterate 连续实验仍关闭。
+当前源码为 R21：先折叠列组、延后横向 Max。最新机制与复制清单见文末；R13–R20 段落保留为历史说明，各段“默认”指当时版本。最新线上结果 S16 对应 R20，15/15 Pass；R21 尚无线上结果，Iterate 连续实验仍关闭。
 
 R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥有一个 C 临时槽，一个任务拥有 `(batch, M 行块, N 分片)`，遍历分片内所有 N 块。每块沿完整 K 做 Matmul，立即在 Vector 上更新该任务的行最大值，再复用 C 槽。最终 Sum 沿用 R12 的补偿树，Small 的算法和自动门槛不变。
 
@@ -253,3 +253,36 @@ WholeReduceMax 的行重复步长按 32 字节计，FP32 因而要求行宽为 8
 CPU 替身验证的是调用顺序、地址和数值逻辑，不能证明真实硬件并行、CANN 编译或微秒收益。未做本地 NPU 测试；后续 S16 线上 15/15 Pass，按对话关联 R20，平台源码哈希未核验。已有 R19 时只替换 **stream_plan.h、stream_matmul.asc**，其余九个提交文件保持原版本，不制作提交包。
 
 S16 较 S15 的 8–12 点变化均在 ±1.62% 内，13/14/15 分别 +4.06%/+1.84%/+2.83%；没有出现明显新增响应点。当前证据支持这次提交覆盖路径的正确性，尚不能确认稳定性能收益或实际跨任务重叠覆盖。用户反馈分数微涨，但最优参考也发生变化，详见[迭代记录](ITERATION_LOG.md)；不将参考比值缩小当作代码加速。默认开关保留，两项旧实验继续关闭。
+
+
+## R21：先折叠列组、延后横向 Max（2026-10-03）
+
+S16 没有显示跨 owner 流水的明显耗时收益。本轮冻结 R20 的分派、SDK tiling、任务数、C 槽、归约 owner 与补偿 Sum，针对 C 进入 UB 之后重复进行的横向归约。比较过改变 Matmul 内块、重新启用连续 Iterate、重排现有 Max 三条路线；当前选第三条，使新增证据集中在 Vector 消费成本，避免再次混合会话、布局和精度修复。
+
+### 数据流与代价
+
+对有限 FP32 C 值，行最大值可以按列号模 64 分组：`max_j C[r,j] = max_l(max_q C[r,64q+l])`，其中 `0 <= l < 64`，只包含有效列。Max 没有加法舍入，完整 K 的 Matmul 和最终补偿 Sum 顺序保持不变。
+
+- `FoldMaxColumns` 在 `kernel.asc` 中实现：将 UB 中每行的第 64/128/192 列组逐元素 Max 到前 64 个位置，每个 repeat 处理一行。一个 256 列块从四次 WholeReduceMax 加四次行 Max，变成三次逐元素 Max、一次 WholeReduceMax 和一次行 Max。
+- GM 且 `N > 256` 时，每 32 行任务保留 `32×64` 个逐列最大值。每个 DMA 块先折叠，再更新这些位置；全部 N 块完成后才做一次 WholeReduceMax，直接得到完整行最大值。N=1024 时每个行任务的横向归约从 16 次降到 1 次，N=8192 时从 128 次降到 1 次。这些是调用次数，不是预计加速倍数。
+- GM 且 `N <= 256` 只有一个 DMA 块，采用块内折叠，不分配额外累积缓冲；N<=64 时没有列组折叠。Stream/Pipeline 采用块内折叠，每个 C 块的每 32 行只做一次横向归约，随后仍沿用原跨块行 Max。其缓冲大小和 C 槽复用条件保持。
+
+宽 N 的 GM 基础归约 UB 从 47,392 增到 55,456 字节，净增 8,064 字节；Partials 另加 512 字节，最大 55,968，仍在原有 64 KiB 预留内。Matmul 的 UB 预算不减少，Stream UB 不变。`GmReductionUbBase` 统一主机资源判断和 runner 报告；在原合法 plan/caps 下，更新后的检查不会改变候选准入或 Rows/Partials 选择。
+
+代价是更多逐元素 Max 和 UB 读写；收益来自减少横向归约、紧凑行结果合并及相关 Vector 屏障。没有减少 Matmul 次数、C 的 GM 读写字节或全局屏障，所以若这些成本占主导，收益可能很小，也可能退化。原启发式 score 保持冻结，它不能预测新 Max 的微秒耗时。
+
+### 尾部、别名与同步
+
+UB 输入行距固定 256 个 float。折叠的 dst/src0 完全重叠，src1 为当前行内互不重叠的后续列组；不同 repeat 对应不同行。宽 GM 累积缓冲行距为 64，源行距为 256，二者不同分配。所有偏移 32B 对齐，最大 repeat 数为 32。规则依据 [CANN 9 地址重叠约束](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0004.html)；横向归约参数单位见 [WholeReduceMax](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0079.html)。未据此扩大硬件支持声明，线上型号仍未知。
+
+最后不足 64 列的组仅更新有效 mask。例如宽度 65 只将第 64 列并入第 0 个位置，其余前 64 列保留；N=257 的最后一个 DMA 块只更新累积缓冲的第 0 个位置，其他位置保留前面块的最大值。未写的 UB/GM padding 不参与归约。每次依赖的 Vector 操作之间保留 PIPE_V，Stream 的 MTE2→Scalar 围栏和 R20 跨任务提交/Wait/End 次序保留。
+
+### 验证与提交
+
+回归先在旧实现上捕获 GM 和 Stream 重复横向归约；新实现检查每个真实 helper 的归约次数和数值结果。新增最后有效列取最大值的用例覆盖 63/64/65、127/128/129、191/192/193、255/256/257、319/320/321、511/512/513、8191/8192 列；包含 Rows/Partials、M 尾部、全负输入、输入与 guard 保护、补偿抵消及多核唯一写入。原有 1376 组 Stream 检查覆盖四转置、单双槽、分片和新旧跨任务流水，继续检查未完成的 Cube 输出不可读取及 C 复用围栏。CPU 替身同时拒绝部分别名与有依赖的跨 repeat 重叠，不模拟设备时序或真实编译。
+
+runner 为 GM/Stream/Pipeline 记录 `max_schedule={"version":1,"mode":"deferred"|"folded"}`；Small/Iterate 不记录。旧报告缺少此字段时按旧 UB 合约读取，不能把旧报告解释为新算法。字段类型、取值、机制与 shape/family 的对应关系均严格校验。
+
+已有 R20 时同步替换 **kernel.asc、stream_matmul.asc、reduction_plan.h、joint_plan.h、matmul_plan.h**；最后一个文件仅更新资源注释，其余四个包含实际改动。无需新建提交文件或打包。`PIPELINE_CHAIN_TASKS=true`，`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`。`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`；下一次 S17 与 S16 逐点对照，不预设任何点的实际 family 或 N。
+
+最终全套 **77/77 主机检查通过（80.555 秒）**；独立代码审查未发现 Critical/Important 问题，提出的跨 repeat 别名检查缺口已补上。实现提交 `c1d93f1`，尚无线上性能结果。

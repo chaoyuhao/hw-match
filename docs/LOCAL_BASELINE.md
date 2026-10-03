@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R20 跨任务 Pipeline 版；S2 与 Iterate 实验均关闭，`stream_plan.h` 中 `PIPELINE_CHAIN_TASKS=true` 延续同一核上的双槽流水。已有 R19 的线上文件只需替换 `stream_plan.h`、`stream_matmul.asc`。最新 S16 的 15/15 Pass 按对话关联 R20，平台源码哈希未核验；与 S15 比较 5 点快、10 点慢，稳定性能收益尚未确认。最新机制见 [流式融合与对照](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。下面 NPU 命令仅是可选工具，不是当前提交前置步骤。
+当前源码为 R21 Max 重排版。已有 R20 时替换 `kernel.asc`、`stream_matmul.asc`、`reduction_plan.h`、`joint_plan.h`、`matmul_plan.h`（最后一个仅注释）。S2/Iterate 实验保持关闭，R20 跨任务流水保持开启。最新线上 S16 对应 R20，R21 尚无线上结果。机制见[流式融合](STREAMING_FUSION.md)，完整历史见[迭代记录](ITERATION_LOG.md)。以下 NPU 命令仅是可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -139,3 +139,8 @@ R18 曾默认开启连续 Iterate/VECIN 消费，S14 出现三个 Wrong Answer�
 `PIPELINE_CHAIN_TASKS` 是提交源码中的编译期开关，不是环境变量。true 使已选中的 Pipeline 在同一核的相邻任务之间预取下一块 Cube 结果，false 恢复 S15/R19 的逐任务预热。显式 family=pipeline 也尊重它；GM、单槽 Stream、Small 和关闭的 Iterate 实验不使用它。切换后需重新构建。为只比较流水调度，保持 family/tile/sum 控制及两个旧实验开关一致。
 
 新 runner 在 Pipeline 报告中写入 `pipeline_schedule={"version":1,"scope":"core"}`；关闭开关时 scope 为 task。旧报告无此字段仍可读取。原候选排序、score 和 UB/scratch 字节数保持不变，score 继续表示旧模型的抽象工作估计，不能当作 R20 的微秒预测。来源哈希仍包含全部 11 个提交文件。
+
+
+### R21 Max 调度元数据
+
+GM 且 N>256 的 `max_schedule` 为 `{"version":1,"mode":"deferred"}`，其他 GM/Stream/Pipeline 为 `folded`；Small/Iterate 不记录此字段。宽 GM 的 `reduction.ub_used` 基数为 55456，窄 GM 为 47392，再加记录折叠缓冲。历史无字段报告继续按旧资源合约读取。主机候选 score 保持旧模型，不是新 Vector 实现的实测代价。版本比较必须同时保存全部提交文件哈希。

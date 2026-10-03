@@ -4,7 +4,7 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R20：跨任务延续双槽 Pipeline**。默认 `PIPELINE_CHAIN_TASKS=true`，在上一任务最后的 Max/补偿记录完成前，预提交同一核下一任务的首块 Matmul。保留 R16 的候选选择与数据布局，`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`。**提交前 76 项主机检查通过，S16 线上 15/15 Pass**；本轮跨任务流水的性能收益尚未确认，连续 Iterate 实验仍未线上验证。已有 R19 时只需替换 **stream_plan.h、stream_matmul.asc**，其余九个提交文件不变。机制和开关见 [R20](docs/STREAMING_FUSION.md#r20跨任务延续双槽-pipeline2026-10-03)。
+当前源码版本 **R21：先折叠列组、延后横向 Max**，实现 `c1d93f1`。GM 的宽 N 跨 DMA 块累积 64 个列位置的最大值，最后才做横向归约；Stream/Pipeline 先在 C 块内折叠列组。Matmul 选择、SDK tiling、R20 流水和补偿 Sum 保持。**77/77 主机检查通过，独立审查无关键问题；R21 尚无线上结果**，S16 属于 R20。已有 R20 时替换 **kernel.asc、stream_matmul.asc、reduction_plan.h、joint_plan.h、matmul_plan.h**（最后一个仅资源注释），无需新文件。机制、资源代价与验证边界见 [R21](docs/STREAMING_FUSION.md#r21先折叠列组延后横向-max2026-10-03)。
 
 线上硬件型号仍未确认：910B2C 是本地设备；原始模板默认编译目标 `dav-2201`，允许 `NPU_ARCH` 覆盖，这不能证明线上实际卡型。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
 
