@@ -1,10 +1,10 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 **S16 / R20 默认配置：15/15 通过，错误占比均 0.00%**。用户反馈分数微涨，未提供具体分数；与 S15 相比自身耗时 5 点变快、10 点变慢，尚未确认稳定提速。点 15 为 114.03 μs，历史退化未解决。版本按对话关联，平台源码/开关哈希未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 **S17 / R21：15/15 通过，错误占比均 0.00%**。较 S16，9 点变快、5 点变慢、1 点持平；8–12 全部下降 0.94%～4.35%，增加对 Max 重排有效的支持，仍缺少重复观测。用户反馈分数微涨，数值未提供。点 15 为 111.49 μs，历史退化未解决。版本按对话关联，平台源码/开关哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R21：先折叠列组、延后横向 Max**，实现 `c1d93f1`。GM 的宽 N 跨 DMA 块累积 64 个列位置的最大值，最后才做横向归约；Stream/Pipeline 先在 C 块内折叠列组。Matmul 选择、SDK tiling、R20 流水和补偿 Sum 保持。**77/77 主机检查通过，独立审查无关键问题；R21 尚无线上结果**，S16 属于 R20。已有 R20 时替换 **kernel.asc、stream_matmul.asc、reduction_plan.h、joint_plan.h、matmul_plan.h**（最后一个仅资源注释），无需新文件。机制、资源代价与验证边界见 [R21](docs/STREAMING_FUSION.md#r21先折叠列组延后横向-max2026-10-03)。
+当前源码版本 **R21：先折叠列组、延后横向 Max**，实现 `c1d93f1`。GM 的宽 N 跨 DMA 块累积 64 个列位置的最大值，最后才做横向归约；Stream/Pipeline 先在 C 块内折叠列组。Matmul 选择、SDK tiling、R20 流水和补偿 Sum 保持。**提交前 77/77 主机检查通过，S17 线上 15/15 Pass**；点 8–12 出现一致方向的小幅改善，实际路径和稳定收益仍待更多证据。已有 R20 时替换 **kernel.asc、stream_matmul.asc、reduction_plan.h、joint_plan.h、matmul_plan.h**（最后一个仅资源注释），无需新文件。机制、资源代价与验证边界见 [R21](docs/STREAMING_FUSION.md#r21先折叠列组延后横向-max2026-10-03)。
 
 线上硬件型号仍未确认：910B2C 是本地设备；原始模板默认编译目标 `dav-2201`，允许 `NPU_ARCH` 覆盖，这不能证明线上实际卡型。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
 

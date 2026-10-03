@@ -1,6 +1,6 @@
 # 跨阶段融合：Matmul → Max → Sum
 
-当前源码为 R21：先折叠列组、延后横向 Max。最新机制与复制清单见文末；R13–R20 段落保留为历史说明，各段“默认”指当时版本。最新线上结果 S16 对应 R20，15/15 Pass；R21 尚无线上结果，Iterate 连续实验仍关闭。
+当前源码为 R21：先折叠列组、延后横向 Max。最新机制与复制清单见文末；R13–R20 段落保留为历史说明，各段“默认”指当时版本。最新线上 S17 对应 R21，15/15 Pass；较 S16 的点 8–12 全部下降 0.94%～4.35%，新增 Max 收益获得部分支持，稳定性与实际路径仍未知。Iterate 连续实验仍关闭。
 
 R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥有一个 C 临时槽，一个任务拥有 `(batch, M 行块, N 分片)`，遍历分片内所有 N 块。每块沿完整 K 做 Matmul，立即在 Vector 上更新该任务的行最大值，再复用 C 槽。最终 Sum 沿用 R12 的补偿树，Small 的算法和自动门槛不变。
 
@@ -283,6 +283,8 @@ UB 输入行距固定 256 个 float。折叠的 dst/src0 完全重叠，src1 为
 
 runner 为 GM/Stream/Pipeline 记录 `max_schedule={"version":1,"mode":"deferred"|"folded"}`；Small/Iterate 不记录。旧报告缺少此字段时按旧 UB 合约读取，不能把旧报告解释为新算法。字段类型、取值、机制与 shape/family 的对应关系均严格校验。
 
-已有 R20 时同步替换 **kernel.asc、stream_matmul.asc、reduction_plan.h、joint_plan.h、matmul_plan.h**；最后一个文件仅更新资源注释，其余四个包含实际改动。无需新建提交文件或打包。`PIPELINE_CHAIN_TASKS=true`，`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`。`LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`；下一次 S17 与 S16 逐点对照，不预设任何点的实际 family 或 N。
+已有 R20 时同步替换 **kernel.asc、stream_matmul.asc、reduction_plan.h、joint_plan.h、matmul_plan.h**；最后一个文件仅更新资源注释，其余四个包含实际改动。无需新建提交文件或打包。`PIPELINE_CHAIN_TASKS=true`，`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`。提交前状态为 `LOCAL_CANN_BUILD=NOT_RUN`、`LOCAL_NPU_TEST=NOT_RUN`、`ONLINE_EVALUATION=NOT_RUN`，当时约定 S17 与 S16 对照；现已收到 S17，本地状态保持，不预设任何点的实际 family 或 N。
 
-最终全套 **77/77 主机检查通过（80.555 秒）**；独立代码审查未发现 Critical/Important 问题，提出的跨 repeat 别名检查缺口已补上。实现提交 `c1d93f1`，尚无线上性能结果。
+最终全套 **77/77 主机检查通过（80.555 秒）**；独立代码审查未发现 Critical/Important 问题，提出的跨 repeat 别名检查缺口已补上。实现提交 `c1d93f1`；后续 S17 的 15/15 Pass 按对话关联发布 `d0b842f`，平台源码哈希未核验。
+
+S17 较 S16 的 8–12 点全部改善，依次 -2.95%/-4.35%/-0.94%/-2.17%/-2.33%，增加对减少横向 Max 开销有用的支持；没有实际路径或重复数据，不能分离 GM/Stream 贡献或确认稳定收益。13/14 略慢，15 仍在约 111 μs；点 1 虽明显下降，Small 未改，暂不归因于本轮 Max 重排。完整数据见[迭代记录](ITERATION_LOG.md)，当前代码保持 R21。

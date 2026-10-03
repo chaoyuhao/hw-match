@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R21 Max 重排版。已有 R20 时替换 `kernel.asc`、`stream_matmul.asc`、`reduction_plan.h`、`joint_plan.h`、`matmul_plan.h`（最后一个仅注释）。S2/Iterate 实验保持关闭，R20 跨任务流水保持开启。最新线上 S16 对应 R20，R21 尚无线上结果。机制见[流式融合](STREAMING_FUSION.md)，完整历史见[迭代记录](ITERATION_LOG.md)。以下 NPU 命令仅是可选工具，不是当前提交前置步骤。
+当前源码为 R21 Max 重排版。已有 R20 时替换 `kernel.asc`、`stream_matmul.asc`、`reduction_plan.h`、`joint_plan.h`、`matmul_plan.h`（最后一个仅注释）。S2/Iterate 实验保持关闭，R20 跨任务流水保持开启。最新线上 S17 按对话关联 R21，15/15 Pass；8–12 较 S16 全部小幅改善，实际路径与收益稳定性仍待更多证据。机制见[流式融合](STREAMING_FUSION.md)，完整历史见[迭代记录](ITERATION_LOG.md)。以下 NPU 命令仅是可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
