@@ -188,7 +188,7 @@ inline ExecutionPlan ExpandPartialReduction(const ProblemDesc& p,const HardwareC
     // Do not mistake row padding for useful compression, or add a second
     // reduction level when there is only one segment to sum.
     if(reduction.segments<2 || uint64_t(reduction.segments)*16>=p.m) return selected;
-    const uint64_t used=(gm?47392:selected.stream.ubBytes)+uint64_t(reduction.foldUbBytes);
+    const uint64_t used=(gm?GmReductionUbBase(p.n):selected.stream.ubBytes)+uint64_t(reduction.foldUbBytes);
     if(used>64*1024 || used+selected.matmul.ubBudget>h.ubBytes) return selected;
     auto result=selected;
     result.reduction=reduction;

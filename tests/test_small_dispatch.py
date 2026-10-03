@@ -318,6 +318,28 @@ int main(){using local_baseline::ExecutionFamily;using local_baseline::Reduction
             for row in rows:
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)
 
+            folded=[row for row in rows if row['family'] in ('gm','stream','pipeline')]
+            self.assertTrue(folded)
+            self.assertTrue(any(row['family']=='gm' and row['problem']['n']>256 for row in folded))
+            for row in folded:
+                deferred=row['family']=='gm' and row['problem']['n']>256
+                self.assertEqual(row.get('max_schedule'),dict(version=1,mode='deferred' if deferred else 'folded'))
+                if row['family']=='gm':
+                    self.assertEqual(row['reduction']['ub_used'],(55456 if deferred else 47392)+row['reduction']['fold_ub_bytes'])
+                old=json.loads(json.dumps(row));del old['max_schedule']
+                if deferred:old['reduction']['ub_used']-=8064
+                self.assertEqual(plan_metadata.validate_execution(old,old['problem']),old)
+                for fields in (None,dict(version=True,mode='folded'),dict(version=2,mode='folded'),
+                               dict(version=1,mode='other'),dict(version=1,mode='folded',extra=0),
+                               dict(version=1,mode='folded' if deferred else 'deferred')):
+                    bad=json.loads(json.dumps(row));bad['max_schedule']=fields
+                    with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
+            for row in rows:
+                if row['family'] in ('small','iterate'):
+                    self.assertNotIn('max_schedule',row)
+                    bad=json.loads(json.dumps(row));bad['max_schedule']=dict(version=1,mode='folded')
+                    with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
+
             pipelines=[row for row in rows if row['family']=='pipeline']
             self.assertTrue(pipelines)
             for row in pipelines:

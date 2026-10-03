@@ -13,6 +13,7 @@ class StreamMatmulTests(unittest.TestCase):
         start=kernel.index('__aicore__ inline void SumRowMaxima(')
         end=kernel.index('template <typename T, bool TA, bool TB>',start)
         constants='\n'.join(re.findall(r'constexpr uint32_t REDUCE_\w+ = \d+;',kernel))
+        fold=kernel[kernel.index('__aicore__ inline void FoldMaxColumns('):kernel.index('__aicore__ inline void ComputeRowMaxima(')]
         helpers=(ROOT/'stream_matmul.asc').read_text().split('// Device entry point')[0]
         stubs=(ROOT/'tests/reduction_cpu_stubs.h').read_text().replace('#pragma once','')
         # Observe explicit Scalar fences and each copied C element. This checks
@@ -21,7 +22,7 @@ class StreamMatmulTests(unittest.TestCase):
             'static unsigned mte2Fences=0;\ntemplate <HardEvent E> void WaitFlag(int) { if(E==HardEvent::MTE2_S) ++mte2Fences; }')
         stubs=stubs.replace('inline float readGm(float* p) {','static void (*readHook)(float*)=nullptr;\ninline float readGm(float* p) {\n    if(readHook) readHook(p);')
         stubs=stubs.replace('inline void writeGm(float* p, float v) {','static void (*writeHook)(float*)=nullptr;\ninline void writeGm(float* p, float v) {\n    if(writeHook) writeHook(p);')
-        source=stubs+'\n#include "stream_plan.h"\n#define __gm__\nnamespace local_baseline {\n'+constants+'\n'+(ROOT/'partial_sum.asc').read_text()+kernel[start:end]+helpers+'\n}\n'+(ROOT/'tests/stream_cpu_main.cpp').read_text()
+        source=stubs+'\n#include "stream_plan.h"\n#define __gm__\nnamespace local_baseline {\n'+constants+'\n'+(ROOT/'partial_sum.asc').read_text()+kernel[start:end]+fold+helpers+'\n}\n'+(ROOT/'tests/stream_cpu_main.cpp').read_text()
         with tempfile.TemporaryDirectory() as directory:
             cpp=Path(directory)/'stream.cpp'; binary=Path(directory)/'stream';cpp.write_text(source)
             done=subprocess.run(['g++','-std=c++14','-O2','-ffp-contract=off','-Wall','-Wextra','-Werror','-I',str(ROOT),str(cpp),'-o',str(binary)],capture_output=True,text=True)

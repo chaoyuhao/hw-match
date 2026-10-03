@@ -100,10 +100,12 @@ void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t t
  }
  if(pattern==3)require(golden[0]==200,"bad Max-before-Sum counterexample");
  blockNum=plan.blocks;scratchStart=s;cFloats=plan.maximaOffset/4;consumed.assign(cFloats,false);lastReadFence.assign(cFloats,0);readHook=trackRead;
- bufferCount=buffers;asyncIssues=asyncWaits=overlappedReads=0;scalarReads=0;
+ bufferCount=buffers;asyncIssues=asyncWaits=overlappedReads=0;scalarReads=0;wholeMaxCalls=0;
  coldWaits=pendingReads=overlappedFinalWrites=0;scratchFloats=sc;writeHook=trackWrite;
  std::vector<TPipe> pipes(blockNum);
  for(blockIdx=0;blockIdx<blockNum;++blockIdx){CpuMatmul cpu;StreamProduce<float,TA,TB>(pipes[blockIdx],cpu,(GM_ADDR)a,(GM_ADDR)b,(GM_ADDR)s,B,M,N,K,plan,chainTasks);require(!cpu.pending&&!cpu.open,"producer finished with pending/unclosed Matmul");}
+ uint64_t rowChunks=0;for(uint32_t row=0;row<M;row+=tileM)rowChunks+=(std::min(tileM,M-row)+31)/32;
+ require(wholeMaxCalls==B*rowChunks*((N+tileN-1)/tileN),"Stream still repeats horizontal Max within C tile");
  if(splits>1)for(blockIdx=0;blockIdx<blockNum;++blockIdx)MergeStreamMaxima(pipes[blockIdx],(GM_ADDR)s,B,M,plan);
  require(scalarReads==0,"producer/merge unexpectedly reads Scalar");
  for(blockIdx=0;blockIdx<blockNum;++blockIdx)if(records)FinalizePartialSums(pipes[blockIdx],(GM_ADDR)s+plan.maximaOffset,(GM_ADDR)y,B,plan.reduction);else SumRowMaxima(pipes[blockIdx],(GM_ADDR)s+plan.maximaOffset,(GM_ADDR)y,B,M,plan.rowPitch);

@@ -16,6 +16,7 @@ inline void require(bool ok, const char* text) { if (!ok) throw std::runtime_err
 namespace AscendC {
 static uint32_t blockIdx, blockNum;
 static uint64_t scalarReads = 0;
+static uint64_t wholeMaxCalls = 0;
 inline uint32_t GetBlockIdx() { return blockIdx; }
 inline uint32_t GetBlockNum() { return blockNum; }
 enum class TPosition { VECIN, VECOUT, VECCALC };
@@ -149,6 +150,7 @@ inline void Muls(LocalTensor<float> dst, LocalTensor<float> a, float v, uint32_t
 }
 inline void WholeReduceMax(LocalTensor<float> dst, LocalTensor<float> src, int mask, int repeats,
                            int dstStride, int blockStride, int repeatStride, ReduceOrder) {
+    ++wholeMaxCalls;
     require(mask > 0 && mask <= 64 && repeats > 0 && repeats <= 255, "invalid reduction mask/repeats");
     for (int r = 0; r < repeats; ++r) {
         float value = -std::numeric_limits<float>::infinity();
@@ -162,5 +164,43 @@ inline void WholeReduceMax(LocalTensor<float> dst, LocalTensor<float> src, int m
 }
 inline void Max(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b, uint32_t n) {
     for (uint32_t i = 0; i < n; ++i) dst.SetValue(i, std::max(a.LaneValue(i), b.LaneValue(i)));
+}
+struct BinaryRepeatParams {
+    uint8_t dstBlkStride, src0BlkStride, src1BlkStride;
+    uint8_t dstRepStride, src0RepStride, src1RepStride;
+};
+inline void Max(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b,
+                uint64_t mask, uint8_t repeats, const BinaryRepeatParams& p) {
+    require(mask>0 && mask<=64 && repeats>0,"invalid repeated Max mask/count");
+    require(dst.offset%8==0 && a.offset%8==0 && b.offset%8==0,"unaligned repeated Max");
+    // This test surface uses contiguous blocks inside each repeat. Reject
+    // partial same-repeat alias and every cross-repeat RAW/WAR dependency.
+    require(p.dstBlkStride==1 && p.src0BlkStride==1 && p.src1BlkStride==1,
+            "unmodeled Max block stride");
+    auto aliases = [&](LocalTensor<float> src, uint8_t stride) {
+        if (src.data != dst.data) return;
+        if (src.offset==dst.offset && stride==p.dstRepStride &&
+            (repeats==1 || uint64_t(stride)*8>=mask)) return;
+        for(unsigned w=0;w<repeats;++w)for(unsigned r=0;r<repeats;++r){
+            const size_t out=dst.offset+w*p.dstRepStride*8;
+            const size_t in=src.offset+r*stride*8;
+            require(out+mask<=in || in+mask<=out || (w==r && out==in),
+                    "unsupported repeated Max address dependency");
+        }
+    };
+    aliases(a,p.src0RepStride);aliases(b,p.src1RepStride);
+    // Read the whole instruction before writing, as independent vector lanes.
+    // Check bounds/poison for every active lane; this does not model V timing.
+    std::vector<size_t> destinations;
+    std::vector<float> values;
+    for(unsigned r=0;r<repeats;++r)for(unsigned lane=0;lane<mask;++lane){
+        const size_t di=r*p.dstRepStride*8+(lane/8)*p.dstBlkStride*8+lane%8;
+        const size_t ai=r*p.src0RepStride*8+(lane/8)*p.src0BlkStride*8+lane%8;
+        const size_t bi=r*p.src1RepStride*8+(lane/8)*p.src1BlkStride*8+lane%8;
+        const float x=a.LaneValue(ai),y=b.LaneValue(bi);
+        require(std::isfinite(x)&&std::isfinite(y),"repeated Max read invalid lane");
+        destinations.push_back(di);values.push_back(std::max(x,y));
+    }
+    for(size_t i=0;i<values.size();++i)dst.SetValue(destinations[i],values[i]);
 }
 } // namespace AscendC

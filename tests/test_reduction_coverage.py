@@ -33,7 +33,7 @@ int main(){
  assert(a.reduction.mode==0 && b.reduction.mode==1);
  assert(b.reduction.segmentRows==32 && b.reduction.segments==2 && b.reduction.bytes==24576);
  assert(b.reduction.foldUbBytes==512 && b.score==ExecutionCost(p,b));
- auto limited=h;limited.ubBytes=a.matmul.ubBudget+47903;
+ auto limited=h;limited.ubBytes=a.matmul.ubBudget+55967;
  assert(ExpandPartialReduction(p,limited,a).reduction.mode==0);
  limited.ubBytes++;assert(ExpandPartialReduction(p,limited,a).reduction.mode==1);
  for(unsigned m:{1u,16u,17u,32u}){p.m=m;assert(!ExpandPartialReduction(p,h,gm(p,h)).reduction.mode);}

@@ -2,6 +2,9 @@
 #define CANN_MATCH_REDUCTION_PLAN_H
 #include "matmul_plan.h"
 namespace local_baseline {
+// GM: 32x256 input + 32 output + Max temporary + 14368-byte final Sum.
+// For N>256 the temporary is 32x64 lanes instead of 32 compact maxima.
+inline uint32_t GmReductionUbBase(uint32_t n) { return n > 256 ? 55456 : 47392; }
 enum class ReductionPolicy : uint32_t { Auto = 0, Rows = 1, Partials = 2 };
 // mode=0: row maxima; mode=1: 64B record containing eight high/low pairs.
 struct ReductionPlan {

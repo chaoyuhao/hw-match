@@ -103,9 +103,17 @@ def validate_execution(plan, case):
             selection.get('cost_model') != {2:'joint-work-v1',3:'joint-work-v2'}[selection['planner_version']] or
             type(selection.get('score')) not in (int,float) or not math.isfinite(selection['score']) or selection['score'] <= 0):
             raise ValueError('invalid joint selection metadata')
+    if 'max_schedule' in plan:
+        schedule = plan['max_schedule']
+        expected = 'deferred' if family == 'gm' and case['n'] > 256 else 'folded'
+        if (family not in ('gm', 'stream', 'pipeline') or not isinstance(schedule, dict) or
+            set(schedule) != {'version', 'mode'} or type(schedule['version']) is not int or
+            schedule['version'] != 1 or schedule['mode'] != expected):
+            raise ValueError('invalid Max schedule')
     if family == 'gm':
         gm = validate(plan.get('matmul'), case)
-        validate_reduction(plan,case,32,47392,gm['ub_budget'])
+        base_ub = 55456 if 'max_schedule' in plan and case['n'] > 256 else 47392
+        validate_reduction(plan,case,32,base_ub,gm['ub_budget'])
         if plan.get('variant') != 'mix' or any(plan[k] != gm[k] for k in ('tasks','blocks','available_cores','ub_bytes')):
             raise ValueError('GM execution disagrees with Matmul plan')
     elif family in ('stream','pipeline','iterate'):

@@ -14,7 +14,7 @@ class MatmulTileTests(unittest.TestCase):
         self.assertTrue((ROOT / "matmul_plan.h").exists(), "shared rule planner is not implemented")
         if not shutil.which("g++"):
             self.skipTest("host C++ compiler unavailable")
-        helpers = source[source.index("struct MatmulBlock"):source.index("__aicore__ inline void ComputeRowMaxima")]
+        helpers = source[source.index("struct MatmulBlock"):source.index("__aicore__ inline void FoldMaxColumns")]
         with tempfile.TemporaryDirectory(prefix="cann-tile-cpu-") as tmp:
             file = Path(tmp) / "test.cpp"
             file.write_text("#include <algorithm>\n#include <cstdint>\n#include <limits>\n#include <stdexcept>\n"

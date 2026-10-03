@@ -27,7 +27,7 @@ class ParallelReductionTests(unittest.TestCase):
         if not shutil.which("g++"):
             self.skipTest("host C++ compiler unavailable")
         if not self.binary.exists():
-            start = kernel.index("__aicore__ inline void ComputeRowMaxima(")
+            start = kernel.index("__aicore__ inline void FoldMaxColumns(")
             end = kernel.index("template <typename T, bool TA, bool TB>", start)
             constants = "\n".join(re.findall(r"constexpr uint32_t REDUCE_\w+ = \d+;", kernel))
             source = Path(self.tmp.name) / "test.cpp"
@@ -40,6 +40,9 @@ class ParallelReductionTests(unittest.TestCase):
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
         result = subprocess.run([str(self.binary), str(family)], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_last_column_wins_across_fold_and_dma_boundaries(self):
+        self.run_family(5)
 
     def test_gm_max_owner_writes_compensated_records(self):
         self.run_family(4)

@@ -34,6 +34,7 @@ void check(uint32_t batches, uint32_t m, uint32_t n, uint32_t cores, int pattern
                     const float cancellation[] = {4096.0f, 0.03125f, -4096.0f, -0.015625f};
                     v = cancellation[row % 4] - col * 0.125f;
                 }
+                if (pattern == 4) v = col==n-1 ? 10.0f+row*0.125f : -100.0f-col;
                 if (pattern == 3) {
                     // The half-ulp at row 1023 must survive the next chunk.
                     v = row == 1022 ? 4096.0f : row == 1025 ? -4096.0f :
@@ -51,11 +52,14 @@ void check(uint32_t batches, uint32_t m, uint32_t n, uint32_t cores, int pattern
     }
     const std::vector<float> before(sp, sp + sCount);
     blockNum = cores;
+    wholeMaxCalls=0;scalarReads=0;
     // Execute actual helpers in two phases; this does not emulate hardware SyncAll.
     std::vector<TPipe> pipes(cores);
     for (blockIdx = 0; blockIdx < cores; ++blockIdx)
         local_baseline::ComputeRowMaxima(pipes[blockIdx], reinterpret_cast<GM_ADDR>(sp),
                                         reinterpret_cast<GM_ADDR>(rp), batches, m, n, pitch, rowPitch, plan);
+    require(wholeMaxCalls==uint64_t(batches)*((m+31)/32), "GM still repeats horizontal Max across N groups");
+    require(scalarReads==0,"GM producer pulled Max through Scalar");
     if(!records) for (uint32_t b = 0; b < batches; ++b)
         for (uint32_t row = 0; row < m; ++row)
             require(rp[static_cast<size_t>(b) * rowPitch + row] == expectedRows[static_cast<size_t>(b) * m + row], "incorrect row maximum");
@@ -63,6 +67,7 @@ void check(uint32_t batches, uint32_t m, uint32_t n, uint32_t cores, int pattern
       if(records) local_baseline::FinalizePartialSums(pipes[blockIdx],reinterpret_cast<GM_ADDR>(rp),reinterpret_cast<GM_ADDR>(yp),batches,plan);
       else local_baseline::SumRowMaxima(pipes[blockIdx], reinterpret_cast<GM_ADDR>(rp),
                                     reinterpret_cast<GM_ADDR>(yp), batches, m, rowPitch);
+    for(const auto& pipe:pipes)require(pipe.bytes==(n>256?55456u:47392u)+plan.foldUbBytes,"GM UB accounting mismatch");
     require(std::memcmp(expectedY.data(), yp, batches * 4) == 0, "sum differs from exact fixture golden");
     require(std::memcmp(before.data(), sp, sCount * 4) == 0, "similarity was modified");
     for (auto i : regions[1].writes) require(i == 1, "missing row-max tile write");
@@ -156,6 +161,9 @@ int main(int argc, char** argv) {
         if (family == 0) {
             for (auto n : {1u, 7u, 8u, 63u, 64u, 65u, 255u, 256u, 257u, 1025u, 8192u})
                 for (auto m : {1u, 31u, 32u, 33u, 65u}) check(2, m, n, 24, 1);
+        } else if (family == 5) {
+            for(auto n:{63u,64u,65u,127u,128u,129u,191u,192u,193u,255u,256u,257u,319u,320u,321u,511u,512u,513u,8191u,8192u})
+                for(bool records:{false,true})check(3,65,n,3,4,records);
         } else if (family == 1) {
             for (auto b : {1u, 8u, 9u, 32u, 257u})
                 for (auto cores : {1u, 3u, 24u}) check(b, 65, 257, cores, 0);
