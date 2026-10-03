@@ -10,19 +10,25 @@ static std::vector<bool> consumed;
 static std::vector<unsigned> lastReadFence;
 static float* pendingStart=nullptr;static size_t pendingSize=0;
 static unsigned asyncIssues=0,asyncWaits=0,overlappedReads=0;
+static unsigned coldWaits=0,pendingReads=0,overlappedFinalWrites=0;
+static size_t scratchFloats=0;
 void trackRead(float* p) {
  auto a=reinterpret_cast<uintptr_t>(p),b=reinterpret_cast<uintptr_t>(scratchStart);
  if(a>=b && a<b+cFloats*4) {
   auto pending=reinterpret_cast<uintptr_t>(pendingStart);
   require(!pendingStart || a<pending || a>=pending+pendingSize*4,"read of pending Cube output");
-  if(pendingStart)++overlappedReads;
+  if(pendingStart){++overlappedReads;++pendingReads;}
   const size_t i=(a-b)/4;consumed[i]=true;lastReadFence[i]=AscendC::mte2Fences;
  }
 }
+void trackWrite(float* p) {
+ const auto a=reinterpret_cast<uintptr_t>(p),b=reinterpret_cast<uintptr_t>(scratchStart);
+ if(pendingStart && a>=b+cFloats*4 && a<b+scratchFloats*4)++overlappedFinalWrites;
+}
 struct CpuMatmul {
- uint32_t m=0,n=0,k=0,pitch=0,rows=0,cols=0; bool ta=false,tb=false,pending=false;
+ uint32_t m=0,n=0,k=0,pitch=0,rows=0,cols=0; bool ta=false,tb=false,pending=false,open=false;
  AscendC::GlobalTensor<float> a,b,destination;
- void ready(){require(!pending,"Matmul reconfigured before wait");}
+ void ready(){require(!pending&&!open,"Matmul reconfigured before wait/End");}
  void SetOrgShape(uint32_t M,uint32_t N,uint32_t K,uint32_t Kb,uint32_t P){ready();require(K==Kb,"K mismatch");m=M;n=N;k=K;pitch=P;}
  void SetSingleShape(uint32_t R,uint32_t C,uint32_t K){ready();require(K==k,"partial K");rows=R;cols=C;}
  void SetTensorA(AscendC::GlobalTensor<float> A,bool T){ready();a=A;ta=T;}
@@ -47,15 +53,15 @@ struct CpuMatmul {
    require(!region.readable[i]||mte2Fences>lastReadFence[i],"C overwritten before MTE2->Scalar fence");
    region.writes[i]=0;region.readable[i]=false;consumed[i]=false;
   }
-  destination=c;
+  destination=c;open=true;
   if(Sync)materialize();
-  else {pending=true;pendingStart=c.data;pendingSize=size;++asyncIssues;}
+  else {pending=true;pendingStart=c.data;pendingSize=size;pendingReads=0;++asyncIssues;}
  }
- void WaitIterateAll(){require(pending,"wait without pending Matmul");materialize();pending=false;pendingStart=nullptr;pendingSize=0;++asyncWaits;}
- void End(){ready();}
+ void WaitIterateAll(){require(pending,"wait without pending Matmul");if(!pendingReads)++coldWaits;materialize();pending=false;pendingStart=nullptr;pendingSize=0;++asyncWaits;}
+ void End(){require(!pending&&open,"End without completed call");open=false;}
 };
 template<bool TA,bool TB>
-void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t tileN,uint32_t cores,uint32_t splits,int pattern,uint32_t buffers,bool records) {
+void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t tileN,uint32_t cores,uint32_t splits,int pattern,uint32_t buffers,bool records,bool chainTasks) {
  using namespace AscendC; using namespace local_baseline;
  ProblemDesc p{B,M,N,K,1,TA,TB};HardwareCaps h{cores,192*1024};
  auto mm=MakePlan(p,h,{tileM,tileN});auto plan=SplitStreamPlan(p,h,mm,splits,buffers,records?ReductionPolicy::Partials:ReductionPolicy::Rows);
@@ -95,29 +101,39 @@ void check(uint32_t B,uint32_t M,uint32_t N,uint32_t K,uint32_t tileM,uint32_t t
  if(pattern==3)require(golden[0]==200,"bad Max-before-Sum counterexample");
  blockNum=plan.blocks;scratchStart=s;cFloats=plan.maximaOffset/4;consumed.assign(cFloats,false);lastReadFence.assign(cFloats,0);readHook=trackRead;
  bufferCount=buffers;asyncIssues=asyncWaits=overlappedReads=0;scalarReads=0;
+ coldWaits=pendingReads=overlappedFinalWrites=0;scratchFloats=sc;writeHook=trackWrite;
  std::vector<TPipe> pipes(blockNum);
- for(blockIdx=0;blockIdx<blockNum;++blockIdx){CpuMatmul cpu;StreamProduce<float,TA,TB>(pipes[blockIdx],cpu,(GM_ADDR)a,(GM_ADDR)b,(GM_ADDR)s,B,M,N,K,plan);require(!cpu.pending,"task finished with pending Matmul");}
+ for(blockIdx=0;blockIdx<blockNum;++blockIdx){CpuMatmul cpu;StreamProduce<float,TA,TB>(pipes[blockIdx],cpu,(GM_ADDR)a,(GM_ADDR)b,(GM_ADDR)s,B,M,N,K,plan,chainTasks);require(!cpu.pending&&!cpu.open,"producer finished with pending/unclosed Matmul");}
  if(splits>1)for(blockIdx=0;blockIdx<blockNum;++blockIdx)MergeStreamMaxima(pipes[blockIdx],(GM_ADDR)s,B,M,plan);
  require(scalarReads==0,"producer/merge unexpectedly reads Scalar");
  for(blockIdx=0;blockIdx<blockNum;++blockIdx)if(records)FinalizePartialSums(pipes[blockIdx],(GM_ADDR)s+plan.maximaOffset,(GM_ADDR)y,B,plan.reduction);else SumRowMaxima(pipes[blockIdx],(GM_ADDR)s+plan.maximaOffset,(GM_ADDR)y,B,M,plan.rowPitch);
- readHook=nullptr;
+ readHook=nullptr;writeHook=nullptr;
  require(asyncIssues==asyncWaits,"async work not drained");
  if(buffers==2){require(asyncIssues>0,"double buffer path never issues async Matmul");if((N+tileN-1)/tileN>splits)require(overlappedReads>0,"no producer/consumer overlap");}
  else require(!asyncIssues&&!overlappedReads,"legacy path changed to async");
+ if(buffers==2){
+  require(coldWaits==(chainTasks?plan.blocks:plan.tasks),"unexpected pipeline cold-wait count");
+  if(chainTasks && plan.tasks>plan.blocks)require(overlappedFinalWrites>0,"next Matmul does not overlap previous task finalization");
+  else require(!overlappedFinalWrites,"unexpected cross-task overlap in legacy/single-task schedule");
+  require(asyncIssues==uint64_t(B)*((M+tileM-1)/tileM)*((N+tileN-1)/tileN),"missing/duplicate Matmul tiles");
+ }
  for(uint32_t batch=0;batch<B;++batch)require(y[batch]==golden[batch]&&regions[3].writes[batch]==1,"wrong/missing output");
  require(std::equal(a,a+ac,beforeA.begin())&&std::equal(b,b+bc,beforeB.begin()),"input mutation");
  for(size_t i=0;i<16;++i)require(ss.data[i]==123456 &&ss.data[16+sc+i]==123456&&yy.data[i]==123456&&yy.data[16+B+i]==123456,"guard mutation");
  for(auto& pipe:pipes)require(pipe.bytes==plan.ubBytes,"UB accounting differs from real helper allocation");
 }
 template<bool TA,bool TB>void layouts(){
- for(uint32_t buffers:{1u,2u})for(bool records:{false,true}){
+ for(uint32_t buffers:{1u,2u})for(bool records:{false,true})for(bool chainTasks:{false,true}){
  for(uint32_t tileM:{16u,64u,256u})for(uint32_t tileN:{16u,64u,256u})for(uint32_t edge:{0u,1u}){
   auto m=tileM+edge,n=tileN*2+edge;
-  for(uint32_t splits:{1u,2u}) check<TA,TB>(3,m,n,7,tileM,tileN,3,splits,edge,buffers,records);
+  for(uint32_t splits:{1u,2u}) check<TA,TB>(3,m,n,7,tileM,tileN,3,splits,edge,buffers,records,chainTasks);
  }
- check<TA,TB>(9,17,33,257,16,16,24,2,0,buffers,records);
- check<TA,TB>(1,2,32,2,16,16,24,2,3,buffers,records);
- check<TA,TB>(2,1027,1,1,256,16,3,1,4,buffers,records);
- check<TA,TB>(1,1,1,1,16,16,24,1,2,buffers,records);
+ check<TA,TB>(9,17,33,257,16,16,24,2,0,buffers,records,chainTasks);
+ check<TA,TB>(1,2,32,2,16,16,24,2,3,buffers,records,chainTasks);
+ check<TA,TB>(2,1027,1,1,256,16,3,1,4,buffers,records,chainTasks);
+ check<TA,TB>(1,1,1,1,16,16,24,1,2,buffers,records,chainTasks);
+ check<TA,TB>(5,65,97,8,32,16,2,3,1,buffers,records,chainTasks);
+ check<TA,TB>(2,17,65,8,16,16,4,4,0,buffers,records,chainTasks);
+ check<TA,TB>(9,1,1,8,16,16,3,1,0,buffers,records,chainTasks);
 }}
 int main(){layouts<false,false>();layouts<false,true>();layouts<true,false>();layouts<true,true>();}

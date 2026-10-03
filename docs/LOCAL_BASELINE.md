@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R17 S2 上游对照版，源码开关仍为 true。已收到 S13 的 15/15 Pass，点 15 -30.33% 恢复 S2 水平，但多点明显退化；全局固定旧方案不推荐作为综合默认，设 `S2_UPSTREAM_CONTROL = false` 可恢复 R16 自动方案。本次只归档，未修改开关，未做本地 CANN/NPU 测试。已有 R16 的线上文件只需替换 `kernel.asc`。最新机制见 [流式融合与对照](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。下面 NPU 命令仅是可选工具，不是当前提交前置步骤。
+当前源码为 R20 跨任务 Pipeline 版；S2 与 Iterate 实验均关闭，`stream_plan.h` 中 `PIPELINE_CHAIN_TASKS=true` 延续同一核上的双槽流水。已有 R19 的线上文件只需替换 `stream_plan.h`、`stream_matmul.asc`。S15 的 15/15 Pass 对应 R19，R20 尚无线上结果。最新机制见 [流式融合与对照](STREAMING_FUSION.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。下面 NPU 命令仅是可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -133,3 +133,9 @@ R17 只替换 `kernel.asc`：`S2_UPSTREAM_CONTROL = true` 默认使通用 Auto �
 R18 曾默认开启连续 Iterate/VECIN 消费，S14 出现三个 Wrong Answer。**R19 默认 `ITERATE_MATMUL_MAX=false`、`S2_UPSTREAM_CONTROL=false`，Auto 恢复 R16**。`CANN_MATMUL_MAX=auto` 尊重源码开关，不会重新开启实验；`r16` 始终关闭它。若后续需要单独提交修复后的实验，必须明确将源码开关设为 true 并重新构建，此时只接收 N%8==0 的 ND 行宽，其余保留 R16；未验证其线上正确性和收益。
 
 实验报告仍为 `family=iterate`，增加 `iterate.version=2` 标识修正后的尾块契约，`matmul_max_fusion.status=layout_rejected` 记录对齐回退。v1 历史报告仍可读取，不代表旧结果正确。显式 family/tile/sum 和 sum=r15 保持原控制；来源哈希包含全部 11 个提交文件。线上不读取上述本地环境变量，不安排额外 NPU 前置测试。证据和限制见 [R19](STREAMING_FUSION.md#r19nd-尾块契约修正与默认回退2026-10-03)。
+
+### R20 跨任务流水对照
+
+`PIPELINE_CHAIN_TASKS` 是提交源码中的编译期开关，不是环境变量。true 使已选中的 Pipeline 在同一核的相邻任务之间预取下一块 Cube 结果，false 恢复 S15/R19 的逐任务预热。显式 family=pipeline 也尊重它；GM、单槽 Stream、Small 和关闭的 Iterate 实验不使用它。切换后需重新构建。为只比较流水调度，保持 family/tile/sum 控制及两个旧实验开关一致。
+
+新 runner 在 Pipeline 报告中写入 `pipeline_schedule={"version":1,"scope":"core"}`；关闭开关时 scope 为 task。旧报告无此字段仍可读取。原候选排序、score 和 UB/scratch 字节数保持不变，score 继续表示旧模型的抽象工作估计，不能当作 R20 的微秒预测。来源哈希仍包含全部 11 个提交文件。

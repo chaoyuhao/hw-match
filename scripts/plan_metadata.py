@@ -137,6 +137,12 @@ def validate_execution(plan, case):
     validate_reduction_expansion(plan, case)
     validate_upstream_control(plan)
     validate_matmul_max_fusion(plan, case)
+    if 'pipeline_schedule' in plan:
+        schedule = plan['pipeline_schedule']
+        if (family != 'pipeline' or not isinstance(schedule, dict) or
+            set(schedule) != {'version', 'scope'} or type(schedule['version']) is not int or
+            schedule['version'] != 1 or schedule['scope'] not in ('core', 'task')):
+            raise ValueError('invalid pipeline schedule')
     return plan
 
 

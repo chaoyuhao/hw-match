@@ -1,6 +1,6 @@
 # 跨阶段融合：Matmul → Max → Sum
 
-当前源码为 R19，最新修复与复制清单见文末。以下 R13–R18 段落保留为历史解释；各段“默认”指当时版本。R18 已收 S14：三个 Wrong Answer；R19 默认恢复 R16，S15 15/15 Pass、耗时回到 R16 水平，连续实验仍未线上验证。
+当前源码为 R20，最新流水改动与复制清单见文末。以下 R13–R19 段落保留为历史解释；各段“默认”指当时版本。S15 对应 R19，15/15 Pass；R20 尚无线上结果，Iterate 连续实验仍关闭。
 
 R13 的通用默认路径不再保存完整 similarity：每个活跃核组拥有一个 C 临时槽，一个任务拥有 `(batch, M 行块, N 分片)`，遍历分片内所有 N 块。每块沿完整 K 做 Matmul，立即在 Vector 上更新该任务的行最大值，再复用 C 槽。最终 Sum 沿用 R12 的补偿树，Small 的算法和自动门槛不变。
 
@@ -218,3 +218,36 @@ WholeReduceMax 的行重复步长按 32 字节计，FP32 因而要求行宽为 8
 | 各阶段复用 UB 与扩大块 | 当前不同阶段的缓冲预算/分配未统一按生命周期复用 | 后续；需要证明旧 DMA/Vector/Matmul 引用全部结束后才复用，不能只把预算数字放宽 |
 
 本轮只修复可复现缺陷并隔离失败实验，不同时引入上述性能改动。S14 未定位出哪项等待或布局对应哪一个隐藏点，也没有证明点 15 的具体输入或执行路径。
+
+## R20：跨任务延续双槽 Pipeline（2026-10-03）
+
+这是对现有 Pipeline 调度的有界改动。S15 全通过后，选择保留 R16 的分块、N 分片、SDK tiling 与 Rows/Partials，仅移除每个任务边界的重新预热。同步 Iterate 路径仍关闭；更换 GetTensorC 输出格式或重新设计内部 tiling 的方案留待独立实验。
+
+### 改动原理
+
+旧实现每个 `(batch, M 行块, N 分片)` 先提交首块、立即 Wait/End；中间 N 块使用两个 GM C 槽重叠生产和 Max；最后一块消费和部分和写出后才开始下一任务。新实现把最后一块的预提交目标延伸到同一核下一个 `task + blockNum` 的首块：
+
+```text
+旧：任务 A 最后块 Max → A 的记录写出 → 提交 B 首块 → 等待 → 消费 B
+新：提交 B 首块 → A 最后块 Max → A 的记录写出 → 等待 B → 消费 B
+```
+
+当同一核拥有多个任务时，下一任务的 Cube 可以与当前任务的最后一次 Max、Rows 写回或补偿记录生成并行。只有本核第一个任务需要首块立即等待。Wait/End 总次数仍是每个 Matmul 块一次，Cube 计算量、块数和 A/B 地址不变；这里只增加可用于覆盖等待的独立工作。只有一个任务的核没有新增跨任务重叠机会；GM、单槽 Stream 和 Small 的执行算法不变。不保证未知线上点的命中或收益。
+
+例如 B=3、M=65、N=129、tile=64×64、splits=1、cores=3 时共有 6 个 owner、18 个 Matmul 块：旧流水有 6 次首块立即等待，新流水为 3 次，其余等待都在已有 C 消费之后。这个例子用于解释调度，不是已识别的线上 shape，也不是性能预测。
+
+### 所有权和同步
+
+一个核始终最多一个 Matmul 在途；只在前一次 WaitIterateAll/End 完成后重设 A/B/shape。新提交只写同核的另一个 C 槽，当前 C 的全部 MTE2 读取完成并经过 MTE2_S 围栏后才允许该槽再次被覆盖。两槽奇偶在任务间延续，包括奇数 N 块和不均分片；行 Max 的 output queue 仍等写回后释放，下一任务重新初始化其独立的行 Max。
+
+任务末尾存在下一任务时才预提交，下一任务入口等待并 End。最后任务没有预提交，因此函数返回、全流水屏障和 SyncAll 前全部 Cube 工作已排空。B/M/N 所有权、跨 N 先 Max 再 Sum、补偿求和顺序、分配空间和单 kernel launch 均保持。这里复用已使用的异步 GM 接口，不引入 R18 的 ND LocalTensor 布局。
+
+依据 [CANN 9.0 WaitIterateAll](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0641.html) 与[异步处理说明](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/programug/Ascendcopdevg/atlas_ascendc_10_10015.html)：异步 IterateAll 发出后可做独立工作，使用结果前必须等待。本轮不扩大硬件支持声明；线上 SKU 仍未知，真实重叠和收益由线上确认。
+
+### 验证和提交
+
+默认 `stream_plan.h` 中 `PIPELINE_CHAIN_TASKS=true`；设 false 可恢复 S15 调度。候选评分刻意保持旧模型，因此本轮没有通过重排计划改变路径覆盖。报告单独记录 `pipeline_schedule` 的 core/task 范围，旧报告继续兼容。两项旧实验仍 false。
+
+先在旧实现上加入实际 helper 的调度回归，观察到“每任务重新预热”的预期失败；实现后通过。完整主机 **76/76 通过（78.747 秒）**。Stream 检查 1376 组，交叉四转置、Rows/Partials、单/双槽、旧/新调度，覆盖不均分片、奇偶块数、batch/行跨界、M/N 尾块、负数/零/抵消、空闲核、旧 C 读完前禁止覆盖、配置前 Wait/End 与末尾排空；检查 FP64 golden、输入不变、guard 和 UB 字节数。真实 host 分派在两种 S2 配置下各校验 191 条 JSON，并检查新报告和旧报告兼容。
+
+CPU 替身验证的是调用顺序、地址和数值逻辑，不能证明真实硬件并行、CANN 编译或微秒收益。未做本地 NPU 测试，尚无 S16。已有 R19 时只替换 **stream_plan.h、stream_matmul.asc**，其余九个提交文件保持原版本，不制作提交包。

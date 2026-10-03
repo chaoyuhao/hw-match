@@ -3,6 +3,9 @@
 #include "reduction_plan.h"
 
 namespace local_baseline {
+// R20 keeps R16 planning frozen and carries the existing two-slot pipeline
+// across a core's tasks. false restores the previous per-task schedule.
+constexpr bool PIPELINE_CHAIN_TASKS = true;
 // POD copied to the device. Offsets and scratchBytes are bytes; C capacity is floats.
 struct StreamPlan {
     uint32_t tileM, tileN, splits, blocks, rowPitch, ubBytes;

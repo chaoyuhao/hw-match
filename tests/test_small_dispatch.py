@@ -318,6 +318,22 @@ int main(){using local_baseline::ExecutionFamily;using local_baseline::Reduction
             for row in rows:
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)
 
+            pipelines=[row for row in rows if row['family']=='pipeline']
+            self.assertTrue(pipelines)
+            for row in pipelines:
+                self.assertEqual(row.get('pipeline_schedule'),dict(version=1,scope='core'))
+            old_pipeline=json.loads(json.dumps(pipelines[0]));del old_pipeline['pipeline_schedule']
+            self.assertEqual(plan_metadata.validate_execution(old_pipeline,old_pipeline['problem']),old_pipeline)
+            task_pipeline=json.loads(json.dumps(pipelines[0]));task_pipeline['pipeline_schedule']['scope']='task'
+            self.assertEqual(plan_metadata.validate_execution(task_pipeline,task_pipeline['problem']),task_pipeline)
+            for fields in (None,dict(version=True,scope='core'),dict(version=2,scope='core'),
+                           dict(version=1,scope='batch'),dict(version=1,scope='core',slots=3)):
+                bad=json.loads(json.dumps(pipelines[0]));bad['pipeline_schedule']=fields
+                with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
+            non_pipeline=next(row for row in rows if row['family']!='pipeline')
+            bad=json.loads(json.dumps(non_pipeline));bad['pipeline_schedule']=dict(version=1,scope='core')
+            with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
+
             fused=next(row for row in rows if row['family']=='iterate')
             self.assertEqual(fused['iterate']['version'],2)
             historical=json.loads(json.dumps(fused));historical['iterate']['version']=1

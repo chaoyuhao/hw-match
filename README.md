@@ -4,7 +4,7 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R19：修正 ND 尾块行距，默认恢复 R16**。`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`，保留 Small 和 R16 自动执行方案。实验路径按当前尾块列宽读取紧凑 ND 输出，非 32 字节对齐行宽回退 R16；已用更正后的 CPU 替身复现旧错误并通过修复回归。**76 项主机检查通过；S15 默认回退配置线上 15/15 Pass**。修复后的连续路径仍关闭，尚无线上的精度和性能验证。已有 R18 时替换 **kernel.asc、iterate_matmul.asc**，其余提交依赖不变。依据和限制见 [R19 修复记录](docs/STREAMING_FUSION.md#r19nd-尾块契约修正与默认回退2026-10-03)。
+当前源码版本 **R20：跨任务延续双槽 Pipeline**。默认 `PIPELINE_CHAIN_TASKS=true`，在上一任务最后的 Max/补偿记录完成前，预提交同一核下一任务的首块 Matmul。保留 R16 的候选选择与数据布局，`S2_UPSTREAM_CONTROL=false`、`ITERATE_MATMUL_MAX=false`。**76 项主机检查通过，R20 尚无线上结果**；S15 是 R19 的通过记录。已有 R19 时只需替换 **stream_plan.h、stream_matmul.asc**，其余九个提交文件不变。机制和开关见 [R20](docs/STREAMING_FUSION.md#r20跨任务延续双槽-pipeline2026-10-03)。
 
 线上硬件型号仍未确认：910B2C 是本地设备；原始模板默认编译目标 `dav-2201`，允许 `NPU_ARCH` 覆盖，这不能证明线上实际卡型。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
 
