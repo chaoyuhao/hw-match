@@ -6,7 +6,9 @@ R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-smal
 
 当前源码版本 **R21：先折叠列组、延后横向 Max**，实现 `c1d93f1`。GM 的宽 N 跨 DMA 块累积 64 个列位置的最大值，最后才做横向归约；Stream/Pipeline 先在 C 块内折叠列组。Matmul 选择、SDK tiling、R20 流水和补偿 Sum 保持。**提交前 77/77 主机检查通过，S17 线上 15/15 Pass**；点 8–12 出现一致方向的小幅改善，实际路径和稳定收益仍待更多证据。已有 R20 时替换 **kernel.asc、stream_matmul.asc、reduction_plan.h、joint_plan.h、matmul_plan.h**（最后一个仅资源注释），无需新文件。机制、资源代价与验证边界见 [R21](docs/STREAMING_FUSION.md#r21先折叠列组延后横向-max2026-10-03)。
 
-线上硬件型号仍未确认：910B2C 是本地设备；原始模板默认编译目标 `dav-2201`，允许 `NPU_ARCH` 覆盖，这不能证明线上实际卡型。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
+线上硬件型号仍未得到官方确认：2026-10-05 用户转述群内讨论倾向为 910B，作为优先研究 A2 调度的线索；910B2C 是已知本地设备，不能据此确定线上子型号和核数。原始模板默认 `dav-2201`，允许 `NPU_ARCH` 覆盖。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
+
+新增 [TileLang 调度调研](docs/TILELANG_REVIEW.md)：固定版本阅读上游与昇腾后端，重点为直接 Cube 执行、A 的 L1 驻留、分层缓冲、C/V 槽交接和在线 Max。参考仓库位于已忽略的 `reference-repos/`。本次仅调研，当前执行代码和最新成绩仍为 R21 / S17。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 

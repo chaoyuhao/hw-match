@@ -1,6 +1,7 @@
 /build/
 /build-*/
 /cann-learning-hub/
+/reference-repos/
 /input/
 /output/
 __pycache__/
