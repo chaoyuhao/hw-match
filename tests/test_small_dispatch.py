@@ -23,6 +23,7 @@ class SmallDispatchTests(unittest.TestCase):
 #include "small_plan.h"
 #include "joint_plan.h"
 #include "iterate_plan.h"
+#include "direct_plan.h"
 #include <cassert>
 #include <iostream>
 #include <iomanip>
@@ -34,6 +35,7 @@ struct TensorInfo{const int64_t* shape;int64_t numDims;int32_t dtype;};
 struct TensorGroupInfo{const TensorInfo*tensors;int64_t numTensors;};
 static int rejectFusion=0,fusionTilings=0;static bool rejectS2;static int rejectFirst;static std::vector<std::pair<unsigned,unsigned>> attempts;
 static int launches,allocs,tilers;static uint32_t launchReduction;static size_t scratchBytes;static bool failSync,failTiler;
+static bool directSupported=false;static int directLaunches=0;
 int aclrtSynchronizeStreamWithTimeout(aclrtStream,int){return failSync?1:0;}
 namespace platform_ascendc {
 struct PlatformAscendCManager{static PlatformAscendCManager*GetInstance(){static PlatformAscendCManager p;return &p;}size_t GetLibApiWorkSpaceSize(){return 32;}};
@@ -72,12 +74,14 @@ using FakeTiling=AscendC::tiling::TCubeTiling;
 struct PreparedMatmul{MatmulPlan plan{};HardwareCaps caps{};FakeTiling tiling{};};
 PREPARED_STRUCTS
 HardwareCaps QueryCaps(uint32_t cores){return {cores,192*1024};}
+DirectCaps QueryDirectCaps(){return {directSupported,512*1024,65536,65536,131072};}
 bool TryPrepare(ProblemDesc p,HardwareCaps c,TileRequest tile,PreparedMatmul& out){++tilers;attempts.push_back({tile.m,tile.n});out={MakePlan(p,c,tile),c,{int(tile.m),int(tile.n),16,0}};assert(launches==0);return !failTiler && tilers>rejectFirst && !(rejectS2&&tile.m==32&&tile.n==64);}
 struct StreamCompletion{bool pending=false;StreamCompletion(aclrtStream,DeviceBuffer&,DeviceBuffer&){}void Finish(){Check(failSync,"sync");}};
 template<typename T,typename...Args> void MockSmallLaunch(uint32_t blocks,Args...){assert(blocks>0);++launches;}
 template<typename T,typename...Args> void Dispatch(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).mode;}
 template<typename T,typename...Args> void DispatchIterate(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).stream.reduction.mode;}
 template<typename T,typename...Args> void DispatchStream(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).reduction.mode;}
+template<typename T,typename...Args> void DispatchDirect(Args...args){++launches;++directLaunches;launchReduction=std::get<sizeof...(args)-2>(std::make_tuple(args...)).mode;}
 '''
         structs=kernel[kernel.index('struct PreparedExecution :'):kernel.index('inline HardwareCaps QueryCaps')]
         config='\n'.join(line for line in kernel.splitlines() if line.startswith(('constexpr bool S2_UPSTREAM_CONTROL','constexpr bool ITERATE_MATMUL_MAX')))
@@ -259,7 +263,29 @@ void fusionControl(){
  assert(caught && launches==0 && fusionTilings==0);failTiler=false;
 }
 
+void directControl(){
+ using namespace local_baseline;
+ directSupported=true;
+ for(int dtype:{1,2})for(bool ta:{false,true})for(bool tb:{false,true})for(auto f:{ExecutionFamily::Gm,ExecutionFamily::Pipeline}) {
+  int64_t as[]={2,ta?144:48,ta?48:144},bs[]={2,tb?80:144,tb?144:80},ys[]={2};
+  TensorInfo ai{as,3,dtype},bi{bs,3,dtype},yi{ys,1,0};TensorGroupInfo ag{&ai,1},bg{&bi,1},yg{&yi,1};
+  uint8_t a=0,b=0,y=0;ExecutionInfo actual;
+  for(bool enabled:{false,true}) {
+   launches=allocs=tilers=directLaunches=0;
+   RunKernel(&a,ag,&b,bg,&y,yg,7,(void*)1,ta,tb,{32,64},&actual,f,ReductionPolicy::Auto,true,false,false,enabled);
+   assert(launches==1 && directLaunches==int(enabled));assert(actual.direct.enabled==enabled);
+   assert(actual.plan.tileM==32 && actual.plan.tileN==64 && actual.direct.residentA==enabled);
+   if(enabled){auto json=ExecutionJson(actual,{2,48,80,144,unsigned(dtype),ta,tb},"auto","auto");assert(json.find("direct_cube")!=std::string::npos);std::cout<<json<<'\n';}
+  }
+  // Non-aligned K must never enter direct Cube, even with supported hardware.
+  as[ta?1:2]=143;bs[tb?2:1]=143;launches=allocs=tilers=directLaunches=0;
+  RunKernel(&a,ag,&b,bg,&y,yg,7,(void*)1,ta,tb,{32,64},&actual,f,ReductionPolicy::Auto,true,false,false);
+  assert(launches==1 && !directLaunches && !actual.direct.enabled);
+ }
+ directSupported=false;
+}
 int main(){using local_baseline::ExecutionFamily;using local_baseline::ReductionPolicy;
+ directControl();
  s2Control();
  fusionControl();
  assert(SumPolicy("r15")==ReductionPolicy::Auto);
@@ -310,13 +336,20 @@ int main(){using local_baseline::ExecutionFamily;using local_baseline::Reduction
             done=subprocess.run([str(binary)],capture_output=True,text=True)
             self.assertEqual(done.returncode,0,done.stderr)
             rows=[json.loads(line) for line in done.stdout.splitlines()]
-            self.assertEqual(len(rows),191)
+            self.assertEqual(len(rows),207)
             self.assertTrue(any(row.get('upstream_control',{}).get('status')=='selected' and
                                 (row['upstream_control']['reference_tile_m'],row['upstream_control']['reference_tile_n'])==(32,64)
                                 for row in rows))
             self.assertTrue({16,32} <= {row.get('dot_columns') for row in rows})
             for row in rows:
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)
+            direct=[row for row in rows if row.get('cube_engine',{}).get('mode')=='direct_cube']
+            self.assertEqual(len(direct),16)
+            for row in direct:
+                for key, value in [('mode','unknown'),('block_k',0),('a1_bytes',0),
+                                   ('c0_bytes',262144),('resident_a',False),('sdk_inner_tile_role','execution')]:
+                    bad=json.loads(json.dumps(row));bad['cube_engine'][key]=value
+                    with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
 
             folded=[row for row in rows if row['family'] in ('gm','stream','pipeline')]
             self.assertTrue(folded)

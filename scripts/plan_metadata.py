@@ -142,6 +142,7 @@ def validate_execution(plan, case):
             raise ValueError('small resource accounting mismatch')
         if plan['tasks'] != (b+7)//8 or 'matmul' in plan or 'reduction' in plan:
             raise ValueError('small tasks or unexpected Matmul metadata')
+    validate_cube_engine(plan, case)
     validate_reduction_expansion(plan, case)
     validate_upstream_control(plan)
     validate_matmul_max_fusion(plan, case)
@@ -152,6 +153,37 @@ def validate_execution(plan, case):
             schedule['version'] != 1 or schedule['scope'] not in ('core', 'task')):
             raise ValueError('invalid pipeline schedule')
     return plan
+
+
+def validate_cube_engine(plan, case):
+    """The old SDK inner tile remains a reference when direct Cube is selected."""
+    if 'cube_engine' not in plan:
+        return  # Historical reports predate R22.
+    d = plan['cube_engine']
+    sizes = ('block_k', 'a1_bytes', 'b1_bytes', 'a0_bytes', 'b0_bytes', 'c0_bytes')
+    if (plan['family'] == 'small' or not isinstance(d, dict) or
+        set(d) != {'version','mode','sdk_inner_tile_role','resident_a',*sizes} or
+        type(d['version']) is not int or d['version'] != 1 or type(d['resident_a']) is not bool or
+        any(type(d[key]) is not int or d[key] < 0 for key in sizes)):
+        raise ValueError('invalid Cube engine metadata')
+    if d['mode'] == 'matmul_api':
+        if d['sdk_inner_tile_role'] != 'execution' or d['resident_a'] or any(d[key] for key in sizes):
+            raise ValueError('inactive direct Cube reports allocated resources')
+        return
+    if (d['mode'] != 'direct_cube' or plan['family'] == 'iterate' or
+        d['sdk_inner_tile_role'] != 'reference_only' or any(case[key] % 16 for key in ('m','n','k'))):
+        raise ValueError('invalid direct Cube mode or geometry')
+    tile = plan['matmul'] if plan['family'] == 'gm' else plan['stream']
+    m, n = min(case['m'],tile['tile_m']), min(case['n'],tile['tile_n'])
+    bk = d['block_k']
+    if not 16 <= bk <= min(128,case['k']) or bk % 16:
+        raise ValueError('invalid direct Cube K panel')
+    expected = dict(a1_bytes=m*(case['k'] if d['resident_a'] else bk)*2,
+                    b1_bytes=n*bk*2,a0_bytes=m*bk*2,b0_bytes=n*bk*2,c0_bytes=m*n*4)
+    if (any(d[key] != value for key,value in expected.items()) or
+        d['a1_bytes']+d['b1_bytes'] > 512*1024 or d['a0_bytes'] > 65536 or
+        d['b0_bytes'] > 65536 or d['c0_bytes'] > 131072):
+        raise ValueError('direct Cube resources exceed physical layout or A2 capacity')
 
 
 def validate_stream(plan, case):

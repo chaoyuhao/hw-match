@@ -4,11 +4,11 @@
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R21：先折叠列组、延后横向 Max**，实现 `c1d93f1`。GM 的宽 N 跨 DMA 块累积 64 个列位置的最大值，最后才做横向归约；Stream/Pipeline 先在 C 块内折叠列组。Matmul 选择、SDK tiling、R20 流水和补偿 Sum 保持。**提交前 77/77 主机检查通过，S17 线上 15/15 Pass**；点 8–12 出现一致方向的小幅改善，实际路径和稳定收益仍待更多证据。已有 R20 时替换 **kernel.asc、stream_matmul.asc、reduction_plan.h、joint_plan.h、matmul_plan.h**（最后一个仅资源注释），无需新文件。机制、资源代价与验证边界见 [R21](docs/STREAMING_FUSION.md#r21先折叠列组延后横向-max2026-10-03)。
+当前源码版本 **R22：直接 Cube 执行与 A 的 L1 驻留，待线上验证**。符合 910B 平台、16 对齐和 L1/L0 容量条件时，用独立 AIC/AIV 循环替换逐块 Matmul 会话；保留现有外层选择、FP32 C/Max 和补偿 Sum，其余输入回退 R21 路径。已有 R21 时替换 **kernel.asc**，新增 **direct_plan.h、direct_cube.asc**；其余提交文件保持。`DIRECT_CUBE_ENABLED=false` 可关闭新执行层。机制、覆盖条件、局部流水限制及检查边界见 [R22 说明](docs/DIRECT_CUBE.md)。最新已知线上结果仍是 S17 / R21，不能把它当作本版本正确性证明。
 
 线上硬件型号仍未得到官方确认：2026-10-05 用户转述群内讨论倾向为 910B，作为优先研究 A2 调度的线索；910B2C 是已知本地设备，不能据此确定线上子型号和核数。原始模板默认 `dav-2201`，允许 `NPU_ARCH` 覆盖。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
 
-新增 [TileLang 调度调研](docs/TILELANG_REVIEW.md)：固定版本阅读上游与昇腾后端，重点为直接 Cube 执行、A 的 L1 驻留、分层缓冲、C/V 槽交接和在线 Max。参考仓库位于已忽略的 `reference-repos/`。本次仅调研，当前执行代码和最新成绩仍为 R21 / S17。
+新增 [TileLang 调度调研](docs/TILELANG_REVIEW.md)：固定版本阅读上游与昇腾后端，重点为直接 Cube 执行、A 的 L1 驻留、分层缓冲、C/V 槽交接和在线 Max。参考仓库位于已忽略的 `reference-repos/`；R22 落地第一阶段执行层，后续双缓冲与两 AIV 调度仍未实现。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
@@ -20,7 +20,7 @@ R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-smal
 
 官方资料补充：[cann-learning-hub 调研](docs/LEARNING_HUB_REVIEW.md)；本地资料克隆目录已忽略。整体优化依据见 [实现架构审计](docs/ARCHITECTURE_AUDIT.md)，最新推进顺序以迭代记录和下一版设计为准。
 
-已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前版本需复制 **kernel.asc、matmul_plan.h、small_plan.h、small_vector.h、stream_plan.h、stream_matmul.asc、joint_plan.h、reduction_plan.h、partial_sum.asc、iterate_plan.h、iterate_matmul.asc** 到同目录，其余原始文件保持不变。
+已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前版本需复制 **kernel.asc、matmul_plan.h、small_plan.h、small_vector.h、stream_plan.h、stream_matmul.asc、joint_plan.h、reduction_plan.h、partial_sum.asc、iterate_plan.h、iterate_matmul.asc、direct_plan.h、direct_cube.asc** 到同目录，其余原始文件保持不变。
 
 本地环境与测试仅用于开发调试；正确性、性能和最终得分以统一线上平台评测为准，环境小算子通过不代表赛题通过。
 
