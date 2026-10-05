@@ -24,6 +24,7 @@ class SmallDispatchTests(unittest.TestCase):
 #include "joint_plan.h"
 #include "iterate_plan.h"
 #include "direct_plan.h"
+#include "pipeline_plan.h"
 #include <cassert>
 #include <iostream>
 #include <iomanip>
@@ -81,6 +82,7 @@ template<typename T,typename...Args> void MockSmallLaunch(uint32_t blocks,Args..
 template<typename T,typename...Args> void Dispatch(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).mode;}
 template<typename T,typename...Args> void DispatchIterate(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).stream.reduction.mode;}
 template<typename T,typename...Args> void DispatchStream(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).reduction.mode;}
+template<typename T,typename...Args> void DispatchPipelineCore(Args...args){++launches;launchReduction=std::get<sizeof...(args)-1>(std::make_tuple(args...)).stream.reduction.mode;}
 template<typename T,typename...Args> void DispatchDirect(Args...args){++launches;++directLaunches;launchReduction=std::get<sizeof...(args)-2>(std::make_tuple(args...)).mode;}
 '''
         structs=kernel[kernel.index('struct PreparedExecution :'):kernel.index('inline HardwareCaps QueryCaps')]
@@ -284,7 +286,29 @@ void directControl(){
  }
  directSupported=false;
 }
+
+void nativeControl(){
+ using namespace local_baseline;
+ directSupported=true;failTiler=true; // The new core must not ask the SDK at all.
+ for(int dtype:{1,2})for(bool ta:{false,true})for(bool tb:{false,true})for(auto sum:{ReductionPolicy::Rows,ReductionPolicy::Partials}){
+  int64_t as[]={2,ta?137:35,ta?35:137},bs[]={2,tb?67:137,tb?137:67},ys[]={2};
+  TensorInfo ai{as,3,dtype},bi{bs,3,dtype},yi{ys,1,0};TensorGroupInfo ag{&ai,1},bg{&bi,1},yg{&yi,1};
+  uint8_t a=0,b=0,y=0;ExecutionInfo actual;
+  launches=allocs=tilers=directLaunches=0;
+  RunKernel(&a,ag,&b,bg,&y,yg,7,(void*)1,ta,tb,{},&actual,ExecutionFamily::Auto,sum,true,false,false);
+  assert(actual.pipeline.enabled && actual.isStream && !actual.direct.enabled && !actual.isIterate);
+  assert(launches==1 && allocs==2 && tilers==0 && directLaunches==0);
+  assert(scratchBytes==actual.stream.scratchBytes && launchReduction==actual.reduction.mode);
+  std::cout<<ExecutionJson(actual,{2,35,67,137,unsigned(dtype),ta,tb},"auto","auto",sum==ReductionPolicy::Rows?"rows":"partials")<<'\n';
+  failSync=true;launches=allocs=tilers=0;bool caught=false;
+  try{RunKernel(&a,ag,&b,bg,&y,yg,7,(void*)1,ta,tb,{},nullptr,ExecutionFamily::Auto,sum,true,false,false);}
+  catch(const std::runtime_error&){caught=true;}
+  assert(caught && launches==1 && tilers==0);failSync=false;
+ }
+ directSupported=false;failTiler=false;
+}
 int main(){using local_baseline::ExecutionFamily;using local_baseline::ReductionPolicy;
+ nativeControl();
  directControl();
  s2Control();
  fusionControl();
@@ -336,13 +360,19 @@ int main(){using local_baseline::ExecutionFamily;using local_baseline::Reduction
             done=subprocess.run([str(binary)],capture_output=True,text=True)
             self.assertEqual(done.returncode,0,done.stderr)
             rows=[json.loads(line) for line in done.stdout.splitlines()]
-            self.assertEqual(len(rows),207)
+            self.assertEqual(len(rows),223)
             self.assertTrue(any(row.get('upstream_control',{}).get('status')=='selected' and
                                 (row['upstream_control']['reference_tile_m'],row['upstream_control']['reference_tile_n'])==(32,64)
                                 for row in rows))
             self.assertTrue({16,32} <= {row.get('dot_columns') for row in rows})
             for row in rows:
                 self.assertEqual(plan_metadata.validate_execution(row,row['problem']),row)
+            native=[row for row in rows if row.get('cube_engine',{}).get('mode')=='pipeline_cube']
+            self.assertEqual(len(native),16)
+            for row in native:
+                for key,value in [('c0_bytes',0),('version',1),('sdk_inner_tile_role','execution')]:
+                    bad=json.loads(json.dumps(row));bad['cube_engine'][key]=value
+                    with self.assertRaises(ValueError):plan_metadata.validate_execution(bad,bad['problem'])
             direct=[row for row in rows if row.get('cube_engine',{}).get('mode')=='direct_cube']
             self.assertEqual(len(direct),16)
             for row in direct:

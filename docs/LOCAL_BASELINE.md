@@ -1,6 +1,6 @@
 # 本地 BatchMatmulMaxSum baseline
 
-当前源码为 R21 Max 重排版。已有 R20 时替换 `kernel.asc`、`stream_matmul.asc`、`reduction_plan.h`、`joint_plan.h`、`matmul_plan.h`（最后一个仅注释）。S2/Iterate 实验保持关闭，R20 跨任务流水保持开启。最新线上 S17 按对话关联 R21，15/15 Pass；8–12 较 S16 全部小幅改善，实际路径与收益稳定性仍待更多证据。机制见[流式融合](STREAMING_FUSION.md)，完整历史见[迭代记录](ITERATION_LOG.md)。以下 NPU 命令仅是可选工具，不是当前提交前置步骤。
+当前源码为 R23 独立物理流水版，最新线上成绩是 S18/R22 的 15/15 Pass。R23 的默认 Auto 绕过旧 SDK 候选准备，使用直接 Cube 多层缓冲；本地 JSON 明确标记 `pipeline_cube`，实际物理内块与 SDK 内块区分。机制和三文件增量复制见 [R23 说明](PIPELINE_CORE.md)，完整历史见 [迭代记录](ITERATION_LOG.md)。以下 NPU 命令仅是可选工具，不是当前提交前置步骤。
 
 这是用于本地正确性调试的候选实现，最终以 **CANN 9.0.0 线上平台**评测为准。旧版本 `377f283685ff77c425690e41981e723450398c80` 已在用户的 910B2C / CANN 9.1.0 上通过 smoke 19/19 和 full 55/55；对应 `kernel.asc` SHA256 为 `06cff43ba438d4ecb4003444c459d9712c4777a1f2cc3c1ced3cebaf3c573c1e`。
 
@@ -8,7 +8,7 @@
 
 ## 线上修改范围
 
-用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选共九个源码文件：`kernel.asc`、`matmul_plan.h`、`small_plan.h`、`small_vector.h`、`stream_plan.h`、`stream_matmul.asc`、`joint_plan.h`、`reduction_plan.h`、`partial_sum.asc`；复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
+用户确认：只能修改原有 `kernel.asc`，或新增 `.asc` / `.h` 文件；原有其他文件不能修改。当前候选共十五个源码文件：`kernel.asc`、`matmul_plan.h`、`small_plan.h`、`small_vector.h`、`stream_plan.h`、`stream_matmul.asc`、`joint_plan.h`、`reduction_plan.h`、`partial_sum.asc`、`iterate_plan.h`、`iterate_matmul.asc`、`direct_plan.h`、`direct_cube.asc`、`pipeline_plan.h`、`pipeline_cube.asc`；复制到线上同目录即可，不需要提交包。保留线上原有 `main.asc`、`CMakeLists.txt`、`run.sh` 和 Python 脚本。本仓库的 `local/`、`scripts/run_local.sh` 等仅供本地调试；已有本地环境适配也不复制到线上。
 
 原模板还明确要求：`kernel.asc` 被外部直接 include，不添加 `main()`、`#pragma once` 或 include guard，不重复定义已有的 TensorInfo/TensorGroupInfo。注释里的 `__cube__` 是示例，没有写明禁止 MIX；workspace、host 检查及调试 API 的许可不能从这段注释推断。
 

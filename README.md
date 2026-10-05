@@ -1,14 +1,14 @@
-迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 **S17 / R21：15/15 通过，错误占比均 0.00%**。较 S16，9 点变快、5 点变慢、1 点持平；8–12 全部下降 0.94%～4.35%，增加对 Max 重排有效的支持，仍缺少重复观测。用户反馈分数微涨，数值未提供。点 15 为 111.49 μs，历史退化未解决。版本按对话关联，平台源码/开关哈希未核验。
+迭代历史统一维护在 [ITERATION_LOG.md](docs/ITERATION_LOG.md)。最新反馈 **S18 / R22：15/15 通过，错误占比均 0.00%**。较 S17，7 点略快、8 点略慢，变化范围 -1.93%～+4.58%，尚无结构性提升。点 15 为 109.34 μs。未提供总分/排名，实际分支与平台源码哈希未核验。
 
 逐点推断统一维护在 [CASE_HYPOTHESES.md](docs/CASE_HYPOTHESES.md)：已知现象、当前假说、置信度、替代解释和修订历史。所有点的具体 shape/dtype/布局仍未知，不能把猜测写成实现特例。
 
 R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-small-vector-fast-path-design.md)，保守范围默认启用，未命中时沿用现有 MIX 算路。已收到 S4 全部通过及点 1 显著改善的反馈，具体路径覆盖仍未知；按开发决策，不以额外本地 NPU 测试或性能矩阵作为前置条件。
 
-当前源码版本 **R22：直接 Cube 执行与 A 的 L1 驻留，待线上验证**。符合 910B 平台、16 对齐和 L1/L0 容量条件时，用独立 AIC/AIV 循环替换逐块 Matmul 会话；保留现有外层选择、FP32 C/Max 和补偿 Sum，其余输入回退 R21 路径。已有 R21 时替换 **kernel.asc**，新增 **direct_plan.h、direct_cube.asc**；其余提交文件保持。`DIRECT_CUBE_ENABLED=false` 可关闭新执行层。机制、覆盖条件、局部流水限制及检查边界见 [R22 说明](docs/DIRECT_CUBE.md)。最新已知线上结果仍是 S17 / R21，不能把它当作本版本正确性证明。
+当前源码版本 **R23：独立物理规划与多层 Cube 流水，待线上验证**。Auto 在 Small 之后、旧 SDK 准备之前，根据输入和实际 L1/L0/UB 容量选择物理 tile；A 驻留、双 L1/L0、双 L0C、双 GM 槽和双 UB 条带共同工作，支持 M/N/K 尾块。FP32 Max、补偿 Sum 与旧参考路径保留。已有 R22 时替换 **kernel.asc**，新增 **pipeline_plan.h、pipeline_cube.asc**，其余提交文件保持。`PIPELINE_CORE_ENABLED=false` 恢复 R22 分派，`DIRECT_CUBE_ENABLED=false` 同时禁用两个直接 Cube 后端。机制和验证边界见 [R23 说明](docs/PIPELINE_CORE.md)。S18 不能当作 R23 正确性或提速证明。
 
 线上硬件型号仍未得到官方确认：2026-10-05 用户转述群内讨论倾向为 910B，作为优先研究 A2 调度的线索；910B2C 是已知本地设备，不能据此确定线上子型号和核数。原始模板默认 `dav-2201`，允许 `NPU_ARCH` 覆盖。实现读取平台核数和 UB 容量，接口支持范围及实际收益由线上验证。
 
-新增 [TileLang 调度调研](docs/TILELANG_REVIEW.md)：固定版本阅读上游与昇腾后端，重点为直接 Cube 执行、A 的 L1 驻留、分层缓冲、C/V 槽交接和在线 Max。参考仓库位于已忽略的 `reference-repos/`；R22 落地第一阶段执行层，后续双缓冲与两 AIV 调度仍未实现。
+新增 [TileLang 调度调研](docs/TILELANG_REVIEW.md)：固定版本阅读上游与昇腾后端，重点为直接 Cube 执行、A 的 L1 驻留、分层缓冲、C/V 槽交接和在线 Max。参考仓库位于已忽略的 `reference-repos/`；R23 已实现独立物理规划与分层双缓冲，两 AIV 调度尚未实现。
 
 本地开发入口：运行 `bash scripts/check_env.sh`，用法与报告说明见 [环境检查](docs/ENVIRONMENT_CHECK.md)。
 
@@ -20,7 +20,7 @@ R8 已加入 [小规模 Vector 快路径](docs/superpowers/specs/2026-09-30-smal
 
 官方资料补充：[cann-learning-hub 调研](docs/LEARNING_HUB_REVIEW.md)；本地资料克隆目录已忽略。整体优化依据见 [实现架构审计](docs/ARCHITECTURE_AUDIT.md)，最新推进顺序以迭代记录和下一版设计为准。
 
-已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前版本需复制 **kernel.asc、matmul_plan.h、small_plan.h、small_vector.h、stream_plan.h、stream_matmul.asc、joint_plan.h、reduction_plan.h、partial_sum.asc、iterate_plan.h、iterate_matmul.asc、direct_plan.h、direct_cube.asc** 到同目录，其余原始文件保持不变。
+已确认的线上限制：每次迭代恰好启动一个 kernel；只能修改 `kernel.asc` 或新增 `.asc` / `.h`。当前版本需复制 **kernel.asc、matmul_plan.h、small_plan.h、small_vector.h、stream_plan.h、stream_matmul.asc、joint_plan.h、reduction_plan.h、partial_sum.asc、iterate_plan.h、iterate_matmul.asc、direct_plan.h、direct_cube.asc、pipeline_plan.h、pipeline_cube.asc** 到同目录，其余原始文件保持不变。
 
 本地环境与测试仅用于开发调试；正确性、性能和最终得分以统一线上平台评测为准，环境小算子通过不代表赛题通过。
 

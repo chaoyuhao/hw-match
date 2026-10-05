@@ -99,8 +99,8 @@ def validate_execution(plan, case):
     selection = plan.get('selection')
     if selection is not None:
         if (family == 'small' or not isinstance(selection,dict) or
-            type(selection.get('planner_version')) is not int or selection['planner_version'] not in (2,3) or
-            selection.get('cost_model') != {2:'joint-work-v1',3:'joint-work-v2'}[selection['planner_version']] or
+            type(selection.get('planner_version')) is not int or selection['planner_version'] not in (2,3,5) or
+            selection.get('cost_model') != {2:'joint-work-v1',3:'joint-work-v2',5:'physical-pipeline-v1'}[selection['planner_version']] or
             type(selection.get('score')) not in (int,float) or not math.isfinite(selection['score']) or selection['score'] <= 0):
             raise ValueError('invalid joint selection metadata')
     if 'max_schedule' in plan:
@@ -163,9 +163,27 @@ def validate_cube_engine(plan, case):
     sizes = ('block_k', 'a1_bytes', 'b1_bytes', 'a0_bytes', 'b0_bytes', 'c0_bytes')
     if (plan['family'] == 'small' or not isinstance(d, dict) or
         set(d) != {'version','mode','sdk_inner_tile_role','resident_a',*sizes} or
-        type(d['version']) is not int or d['version'] != 1 or type(d['resident_a']) is not bool or
+        type(d['version']) is not int or d['version'] not in (1,2) or type(d['resident_a']) is not bool or
         any(type(d[key]) is not int or d[key] < 0 for key in sizes)):
         raise ValueError('invalid Cube engine metadata')
+    if d['version'] == 2:
+        if (d['mode'] != 'pipeline_cube' or d['sdk_inner_tile_role'] != 'not_used' or
+            plan['family'] != 'pipeline' or plan['stream']['planner_version'] != 5 or
+            plan.get('selection',{}).get('planner_version') != 5):
+            raise ValueError('invalid native pipeline identity')
+        tile=plan['stream']; m,n=tile['tile_m'],tile['tile_n']; bk=d['block_k']
+        kp=(case['k']+15)//16*16
+        if m not in (16,32,64,128) or n not in (32,64,128) or not 16<=bk<=min(128,kp) or bk%16:
+            raise ValueError('invalid native physical tile')
+        expected=dict(a1_bytes=m*kp*2 if d['resident_a'] else m*bk*4,
+                      b1_bytes=n*bk*4,a0_bytes=m*bk*4,b0_bytes=n*bk*4,c0_bytes=m*n*8)
+        if (any(d[key]!=value for key,value in expected.items()) or
+            d['a1_bytes']+d['b1_bytes']>524288 or d['a0_bytes']>65536 or d['b0_bytes']>65536 or d['c0_bytes']>131072 or
+            tile['inner_tile']!={'m':m,'n':n,'k':bk}):
+            raise ValueError('native pipeline physical resource mismatch')
+        return
+    if plan.get('stream',{}).get('planner_version') == 5:
+        raise ValueError('native stream missing native Cube metadata')
     if d['mode'] == 'matmul_api':
         if d['sdk_inner_tile_role'] != 'execution' or d['resident_a'] or any(d[key] for key in sizes):
             raise ValueError('inactive direct Cube reports allocated resources')
@@ -191,7 +209,7 @@ def validate_stream(plan, case):
     s = plan.get('stream')
     pipeline = plan['family'] == 'pipeline'
     iterative = plan['family'] == 'iterate'
-    if (not isinstance(s, dict) or s.get('planner_version') not in (1,2,3,4) or
+    if (not isinstance(s, dict) or s.get('planner_version') not in (1,2,3,4,5) or
         plan.get('variant') != ('mix_iterate' if iterative else 'mix_pipeline' if pipeline else 'mix_stream') or 'matmul' in plan):
         raise ValueError('invalid stream plan identity')
     version = s['planner_version']
@@ -199,11 +217,11 @@ def validate_stream(plan, case):
         raise ValueError('Iterate and stream version disagree')
     buffers = s.get('buffers', 1 if version == 1 else None)
     if (type(buffers) is not int or buffers != (2 if pipeline else 1) or
-        (pipeline and version not in (2,3)) or (version in (2,3) and not plan.get('selection'))):
+        (pipeline and version not in (2,3,5)) or (version in (2,3) and not plan.get('selection'))):
         raise ValueError('stream buffering/selection mismatch')
     fields = ('tile_m','tile_n','splits','row_pitch','c_slot_elements','maxima_offset',
               'partial_offset','scratch_bytes','max_tiles_per_core','ub_used','ub_budget')
-    zero_fields = ('c_slot_elements','maxima_offset','partial_offset') if iterative else ()
+    zero_fields = ('c_slot_elements','maxima_offset','partial_offset') if iterative else ('ub_budget',) if version==5 else ()
     if any(type(s.get(key)) is not int or s[key] < (0 if key in zero_fields else 1) for key in fields):
         raise ValueError('invalid stream counts/resources')
     tm, tn = tile_token(f"{s['tile_m']}x{s['tile_n']}")
@@ -221,12 +239,14 @@ def validate_stream(plan, case):
     if iterative and (inner['m']%16 or inner['n']%16 or inner['m']>tm or inner['n']>tn or inner['m']*inner['n']>8192):
         raise ValueError('invalid Iterate C tile')
     c_bytes = inner['m']*inner['n']*4 if iterative else 32768
-    slot = 0 if iterative else min(m,tm)*tn
+    slot = 0 if iterative else (tm if version==5 else min(m,tm))*tn
     maxima = plan['blocks']*buffers*slot*4
-    base_ub = c_bytes+tm*4+128+(256 if splits>1 else 0)+14368
+    base_ub = c_bytes+(32768 if version==5 else 0)+tm*4+128+(256 if splits>1 else 0)+14368
     reduction = validate_reduction(plan,case,tm if splits==1 else 32,base_ub,s['ub_budget'])
-    if reduction['mode'] == 'partials' and version not in (3,4):
+    if reduction['mode'] == 'partials' and version not in (3,4,5):
         raise ValueError('partial records require stream planner v3')
+    if version == 5 and (plan.get('selection',{}).get('planner_version') != 5 or plan.get('cube_engine',{}).get('mode') != 'pipeline_cube'):
+        raise ValueError('native pipeline selection/engine missing')
     if version == 3 and plan.get('selection',{}).get('planner_version') != 3:
         raise ValueError('stream and joint planner version mismatch')
     partial = maxima + (reduction['bytes'] if splits > 1 else 0)
@@ -234,10 +254,10 @@ def validate_stream(plan, case):
     expected = dict(row_pitch=pitch,c_slot_elements=slot,maxima_offset=maxima,
                     partial_offset=partial,scratch_bytes=size,
                     ub_used=base_ub+reduction['fold_ub_bytes'],
-                    ub_budget=min(128*1024,plan['ub_bytes']-64*1024))
+                    ub_budget=0 if version==5 else min(128*1024,plan['ub_bytes']-64*1024))
     if size > 2**64-1 or any(s[key] != value for key,value in expected.items()):
         raise ValueError('stream allocation mismatch')
-    if s['ub_used'] > 64*1024 or s['ub_used']+s['ub_budget'] > plan['ub_bytes']:
+    if (version!=5 and s['ub_used'] > 64*1024) or s['ub_used']+s['ub_budget'] > plan['ub_bytes']:
         raise ValueError('stream UB budget exceeded')
     blocks = plan['blocks']
     period = splits // math.gcd(blocks,splits)
@@ -270,7 +290,7 @@ def validate_reduction(plan, case, span, base_ub, matmul_budget):
     if requested not in ('auto','r15') and requested != r['mode']:
         raise ValueError('requested and actual reduction differ')
     partial = r['mode'] == 'partials'
-    if partial and selection_version != 3 and plan['family'] != 'iterate':
+    if partial and selection_version not in (3,5) and plan['family'] != 'iterate':
         raise ValueError('partial records require joint planner v3')
     capacity = 8
     while capacity < span: capacity *= 2
@@ -281,7 +301,7 @@ def validate_reduction(plan, case, span, base_ub, matmul_budget):
                     fold_ub_bytes=extra,ub_used=base_ub+extra)
     if any(type(r.get(key)) is not int or r[key] != value for key,value in expected.items()):
         raise ValueError('reduction geometry/storage mismatch')
-    if not 0 < r['bytes'] <= 2**64-1 or r['ub_used'] > 65536 or r['ub_used']+matmul_budget > plan['ub_bytes']:
+    if not 0 < r['bytes'] <= 2**64-1 or (selection_version!=5 and r['ub_used'] > 65536) or r['ub_used']+matmul_budget > plan['ub_bytes']:
         raise ValueError('reduction resource budget exceeded')
     return r
 
